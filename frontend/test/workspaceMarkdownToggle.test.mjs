@@ -34,7 +34,7 @@ assert.match(fileHeader, /onClick=\{\(\) => setMarkdownViewMode\('code'\)\}/, '�
 assert.match(fileHeader, />\s*Preview\s*</, '切换按钮应包含 Preview 标签');
 assert.match(fileHeader, />\s*Code\s*</, '切换按钮应包含 Code 标签');
 
-const fileContent = sliceBetween(workspaceSource, '{/* File content */}', '</div>\n            </>');
+const fileContent = sliceBetween(workspaceSource.replace(/\r\n/g, '\n'), '{/* File content */}', '</div>\n            </>');
 assert.match(fileContent, /isMarkdownFile\(selectedFile\) && markdownViewMode === 'preview'/, 'Markdown 文件在 preview 模式应走渲染分支');
 assert.match(fileContent, /<MarkdownRenderer[\s\S]*content=\{selectedFile\.content\}/, '渲染分支应传入当前文件内容');
 assert.match(fileContent, /<pre[\s\S]*\{selectedFile\.content\}/, '源码查看分支应保留原始内容显示');

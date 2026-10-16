@@ -242,7 +242,7 @@ class VertexProvider(OAuthProvider):
         # 修改原因：注册 OAuth provider 时需要提供 Vertex AI 默认 API 根地址。
         # 修改方式：返回 Google Vertex AI 官方 aiplatform 根地址。
         # 目的：让 OAuth 解析后的 provider 与现有渠道默认地址保持一致。
-        return "https://aiplatform.googleapis.com/v1beta"
+        return "https://aiplatform.googleapis.com/v1"
 
 
 def _get_vertex_project_id(provider: dict) -> str:
@@ -319,7 +319,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     # 所有模型统一走 global endpoint（Gemini + Claude 均支持）
     location = gemini_preview  # ThreadSafeCircularList(["global"])
 
-    vertex_base_url = provider.get("base_url", "https://aiplatform.googleapis.com/v1beta").rstrip('/')
+    vertex_base_url = provider.get("base_url", "https://aiplatform.googleapis.com/v1").rstrip('/')
 
     if vertex_base_url.endswith('#'):
         url = vertex_base_url[:-1].rstrip('/')
@@ -1128,7 +1128,7 @@ async def fetch_vertex_gemini_models(client, provider):
     """获取 Vertex AI Gemini 可用模型列表。"""
     from ..log_config import logger
 
-    base_url = provider.get('base_url', 'https://aiplatform.googleapis.com/v1beta').rstrip('/')
+    base_url = provider.get('base_url', 'https://aiplatform.googleapis.com/v1').rstrip('/')
 
     # 路由层已经把 OAuth token resolve 到 provider['api'] 里了
     token = provider.get('api')
@@ -1221,7 +1221,7 @@ def register():
     register_channel(
         id="vertex-gemini",
         type_name="vertex-gemini",
-        default_base_url="https://aiplatform.googleapis.com/v1beta",
+        default_base_url="https://aiplatform.googleapis.com/v1",
         auth_header="Authorization: Bearer {access_token}",
         description="Google Vertex AI (Gemini)",
         request_adapter=get_vertex_gemini_payload,
