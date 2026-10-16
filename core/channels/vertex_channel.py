@@ -595,6 +595,14 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                         if any(isinstance(item, dict) and item.get("type") == "null" for item in logic_list):
                             data["nullable"] = True
 
+            # JSON Schema 的 nullable type 数组转为 Gemini 标量 type；保留多类型 union。
+            schema_type = data.get("type")
+            if isinstance(schema_type, list) and "null" in schema_type:
+                non_null_types = [t for t in schema_type if t != "null"]
+                if len(non_null_types) == 1:
+                    data["type"] = non_null_types[0]
+                    data["nullable"] = True
+
             # 1. 移除 Gemini 不支持的字段
             unsupported_fields = [
                 "additionalProperties", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength",
