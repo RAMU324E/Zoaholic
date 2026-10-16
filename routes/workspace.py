@@ -32,14 +32,14 @@ PROJECT_ROOT = Path(os.getcwd()).resolve()
 # r = 可读, w = 可写, d = 可删除
 # 目录尾部带 / 表示目录下所有文件
 WORKSPACE_RULES: List[tuple] = [
-    ("api.yaml", "rw"),
-    ("data/", "rd"),
-    ("plugins/", "r"),
-    ("pyproject.toml", "r"),
-    ("docker-compose.yml", "r"),
-    ("Dockerfile", "r"),
-    (".env", "r"),
-    ("docs/", "r"),
+    ("api.yaml", "rwd"),
+    ("data/", "rwd"),
+    ("plugins/", "rwd"),
+    ("pyproject.toml", "rw"),
+    ("docker-compose.yml", "rw"),
+    ("Dockerfile", "rw"),
+    (".env", "rw"),
+    ("docs/", "rwd"),
 ]
 
 # 禁止在任何操作中暴露的文件扩展名/文件名
