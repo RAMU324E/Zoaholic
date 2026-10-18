@@ -413,3 +413,70 @@ def test_stream_embedded_pseudo_tool_call_inside_display_stream_is_rescued() -> 
     assert reasons[-1] == "tool_calls"
 
 
+def test_ephemeral_dynamic_context_is_moved_to_tail_and_gemini_key_order_is_cache_friendly() -> None:
+    plugin_src = Path(plugin.__file__).read_text(encoding="utf-8")
+    assert "asuka_vfs_stream" not in plugin_src
+
+    turn1_payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "以下是本轮动态上下文信息，每轮可能变化。\n当前时间：15:00"}]},
+            {"role": "user", "parts": [{"text": "第一轮真实用户消息"}]},
+        ],
+        "systemInstruction": {"parts": [{"text": "系统设定固定不变"}]},
+        "tools": [{"function_declarations": [{"name": "read_file", "description": "Read", "parameters": {"type": "object"}}]}],
+        "generationConfig": {"temperature": 1.0},
+    }
+    turn2_payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": "第一轮真实用户消息"}]},
+            {"role": "model", "parts": [{"text": "第一轮助手回复"}]},
+            {"role": "user", "parts": [{"text": "以下是本轮动态上下文信息，每轮可能变化。\n当前时间：15:05"}]},
+            {"role": "user", "parts": [{"text": "第二轮真实用户消息"}]},
+        ],
+        "systemInstruction": {"parts": [{"text": "系统设定固定不变"}]},
+        "tools": [{"function_declarations": [{"name": "read_file", "description": "Read", "parameters": {"type": "object"}}]}],
+        "generationConfig": {"temperature": 1.0},
+    }
+
+    _, _, out1 = asyncio.run(
+        plugin.linux_toolcall_request_interceptor(
+            request=None,
+            engine="gemini",
+            provider={"preferences": {"enabled_plugins": ["linux_toolcall"]}},
+            api_key=None,
+            url="https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+            headers={},
+            payload=turn1_payload,
+        )
+    )
+    _, _, out2 = asyncio.run(
+        plugin.linux_toolcall_request_interceptor(
+            request=None,
+            engine="gemini",
+            provider={"preferences": {"enabled_plugins": ["linux_toolcall"]}},
+            api_key=None,
+            url="https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+            headers={},
+            payload=turn2_payload,
+        )
+    )
+
+    # 1. Gemini dict key order: systemInstruction -> tools -> tool_config -> generationConfig -> contents
+    assert list(out1.keys()) == ["systemInstruction", "tools", "tool_config", "generationConfig", "contents"]
+
+    # 2. Tool description prefix from turn 1 is a 100% strict prefix of turn 2's tool description up to </历史记录>
+    desc1 = out1["tools"][0]["function_declarations"][-1]["description"]
+    desc2 = out2["tools"][0]["function_declarations"][-1]["description"]
+    assert "以下是本轮动态上下文信息" not in desc1
+    assert "以下是本轮动态上下文信息" not in desc2
+    prefix1 = desc1.split("\n</历史记录>")[0]
+    assert desc2.startswith(prefix1)
+
+    # 3. Ephemeral dynamic context is placed in the final user message before tail obfuscation
+    last_text2 = out2["contents"][-1]["parts"][0]["text"]
+    assert "<runtime_ephemeral_env>" in last_text2
+    assert "当前时间：15:05" in last_text2
+    assert last_text2.index("<runtime_ephemeral_env>") < last_text2.index("<posix_kernel_tail_verification>")
+
+
+
