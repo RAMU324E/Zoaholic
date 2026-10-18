@@ -61,8 +61,18 @@ def test_gemini_engine_gemini_4_argon_native_factory_route():
         assert headers.get("User-Agent") == f"factory-cli/{DEFAULT_CLI_VERSION}"
         assert headers.get("X-Factory-Client") == "cli"
         assert headers.get("X-Client-Version") == DEFAULT_CLI_VERSION
+        assert headers.get("x-session-id")
+        assert headers.get("x-assistant-message-id")
+        assert headers.get("x-provider-routing-source") == "registry_default"
+        assert headers.get("x-message-call-type") == "main turn"
 
-        assert list(payload.keys())[0] == "model"
+        assert list(payload.keys()) == [
+            "model",
+            "contents",
+            "systemInstruction",
+            "tools",
+            "generationConfig",
+        ]
         assert payload["model"] == "gemini-4-argon"
 
         # omitSamplingParameters=True for gemini-4-argon
@@ -121,7 +131,15 @@ def test_gemini_engine_chained_with_linux_toolcall_preserves_compliance_and_sche
         )
 
         assert url == "https://api.factory.ai/api/llm/g/v1/generate"
-        assert list(payload.keys())[0] == "model"
+        assert list(payload.keys()) == [
+            "model",
+            "contents",
+            "systemInstruction",
+            "tools",
+            "generationConfig",
+        ]
+        assert "tool_config" not in payload
+        assert "safetySettings" not in payload
         assert payload["model"] == "gemini-4-argon"
         assert payload["generationConfig"]["thinkingConfig"] == {
             "includeThoughts": True,
@@ -170,6 +188,7 @@ def test_claude_and_openai_fast_models_add_and_aliases_preserved():
         assert payload_c["max_tokens"] == 12288  # bumped > budget_tokens (8192 + 4096)
         assert "fast-mode-2026-02-01" in headers_c["anthropic-beta"]
         assert headers_c["Authorization"] == "Bearer fk-claude"
+        assert headers_c["x-api-provider"] == "anthropic"
 
         # Canonical alias claude-fable-5-1-ver -> claude-fable-5.1 @ vertex_anthropic
         headers_f = {"x-api-key": "fk-claude"}
@@ -206,6 +225,7 @@ def test_claude_and_openai_fast_models_add_and_aliases_preserved():
         assert payload_o["store"] is False
         assert "temperature" not in payload_o
         assert headers_o["x-api-provider"] == "openai"
+        assert headers_o["OpenAI-Platform"] == "org-bHuLtG1fGmYk5YaOihAAXFBw"
         assert DEFAULT_COMPLIANCE_PROMPT in payload_o["instructions"]
 
         # 3. OpenAI Chat Completions with Gemini 4 Argon & Droid Core Open Model

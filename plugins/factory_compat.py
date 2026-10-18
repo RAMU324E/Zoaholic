@@ -1,12 +1,14 @@
 """
-Factory AI 兼容插件 (factory_compat) v2.6.0
+Factory AI 兼容插件 (factory_compat) v2.6.1
 
 根据渠道引擎类型，为 Factory AI 上游请求拼接必要内容（基于 Droid CLI v0.244.0 实证）：
 - 幂等的合规 system prompt 注入（Droid + buffer，支持 Claude / OpenAI / Responses / Gemini，
   并内置 priority=65 后置兜底确保与 linux_toolcall 等重写插件组合时合规头不丢失）
-- Factory 专有 headers（x-factory-client / X-Client-Version / User-Agent / x-api-provider）
+- Factory 专有 headers 1:1 复刻（X-Factory-Client / X-Client-Version / User-Agent / x-api-provider /
+  x-session-id / x-assistant-message-id / x-provider-routing-source / x-message-call-type / OpenAI-Platform）
 - 原生支持 Gemini 引擎（/api/llm/g/v1/generate）与 gemini-4-argon：
-  1. 自动重写 URL 至 /api/llm/g/v1/generate，补齐顶层 payload["model"]
+  1. 自动重写 URL 至 /api/llm/g/v1/generate，补齐顶层 payload["model"]，清理非原生字段（safetySettings / tool_config）
+     并严格按 {model, contents, systemInstruction, tools, generationConfig} 排序
   2. 自动将 x-goog-api-key 转换为 Authorization: Bearer，并注入 x-api-provider: google
   3. 针对 gemini-4-argon 自动执行 omitSamplingParameters（剥离 temperature / topP / topK），
      补齐 65536 maxOutputTokens 与 thinkingConfig（默认 MEDIUM），转换 tools.functionDeclarations
@@ -24,6 +26,7 @@ Factory AI 兼容插件 (factory_compat) v2.6.0
 """
 
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -37,11 +40,15 @@ from core.plugins import (
 # ==================== 默认常量与完整模型列表 ====================
 
 CONFIG_KEY = "factory_compat"
-PLUGIN_VERSION = "2.6.0"
+PLUGIN_VERSION = "2.6.1"
 
 # Factory 官方 release（2026-10-16）最新 Droid CLI 为 v0.244.0（含 gemini-4-argon 支持）。
 # 渠道可通过 preferences.factory_compat.cli_version 覆盖伪装版本。
 DEFAULT_CLI_VERSION = "0.244.0"
+
+# droid.exe v0.244.0 固定进程级会话 UUID 与 OpenAI-Platform 组织标识（byte 182934140）
+_PROCESS_SESSION_ID = str(uuid.uuid4())
+FACTORY_OPENAI_PLATFORM_ORG = "org-bHuLtG1fGmYk5YaOihAAXFBw"
 
 # 合规 prompt
 DEFAULT_COMPLIANCE_PROMPT = "You are Droid, an AI software engineering agent built by Factory."
@@ -596,6 +603,18 @@ def _inject_factory_headers(
     _set_header_ci(headers, "X-Factory-Client", "cli")
     _set_header_ci(headers, "X-Client-Version", cli_version)
 
+    # 对齐 droid.exe v0.244.0 createProxyHeaders (vl 函数)：
+    # 若调用方未显式传入，自动补齐 x-session-id、x-assistant-message-id、
+    # x-provider-routing-source、x-message-call-type
+    if not _get_header_ci(headers, "x-session-id"):
+        _set_header_ci(headers, "x-session-id", _PROCESS_SESSION_ID)
+    if not _get_header_ci(headers, "x-assistant-message-id"):
+        _set_header_ci(headers, "x-assistant-message-id", str(uuid.uuid4()))
+    if not _get_header_ci(headers, "x-provider-routing-source"):
+        _set_header_ci(headers, "x-provider-routing-source", "registry_default")
+    if not _get_header_ci(headers, "x-message-call-type"):
+        _set_header_ci(headers, "x-message-call-type", "main turn")
+
     if engine in (CLAUDE_ENGINES | GEMINI_ENGINES):
         # 删除所有 x-api-key / x-goog-api-key 变体，统一转为 Authorization: Bearer
         api_key_values = _pop_header_ci(headers, "x-api-key")
@@ -922,8 +941,8 @@ def _apply_claude_beta_and_fast(
         logger.info(f"[factory_compat] 路由至供应商 {api_provider}（已关闭直连 Fast 模式）")
         return
 
-    # 2. 直连路径
-    _pop_header_ci(headers, "x-api-provider")
+    # 2. 直连路径（对齐 droid.exe v0.244.0 createProxyHeaders：直连 Anthropic 时发送 x-api-provider: anthropic）
+    _set_header_ci(headers, "x-api-provider", "anthropic")
 
     for beta in _cfg_list(cfg, "base_betas", DEFAULT_BASE_BETAS):
         if beta not in beta_parts:
@@ -1197,6 +1216,10 @@ async def factory_compat_request_interceptor(
         elif _is_openai_model(model):
             _set_header_ci(headers, "x-api-provider", "openai")
 
+        if _get_header_ci(headers, "x-api-provider") in ("openai", "azure_openai"):
+            if not _get_header_ci(headers, "OpenAI-Platform"):
+                _set_header_ci(headers, "OpenAI-Platform", FACTORY_OPENAI_PLATFORM_ORG)
+
         payload.setdefault("store", False)
         if strip_sampling_params:
             for k in ("temperature", "top_p", "top_k"):
@@ -1275,16 +1298,30 @@ async def factory_compat_post_request_interceptor(
 
     if engine_lower in GEMINI_ENGINES:
         _normalize_gemini_tools_for_factory(payload)
-        # 确保 "model" 位于 Gemini JSON 负载顶层首位，贴合 droid.exe 的 {model, contents, systemInstruction, tools, generationConfig}
+        # 对齐 droid.exe v0.244.0 的 ft = {model, contents, systemInstruction, tools, generationConfig}：
+        # 清理 gemini_channel / linux_toolcall 附加的 safetySettings 与 tool_config，并严格按官方字段顺序排列
+        if _cfg_bool(cfg, "strip_gemini_extra_fields", True):
+            payload.pop("safetySettings", None)
+            payload.pop("safety_settings", None)
+            payload.pop("tool_config", None)
+            payload.pop("toolConfig", None)
+
         model_val = payload.get("model") or _resolve_gemini_model(request, provider, url, payload)
+        clean_model = ""
         if model_val:
             _, model_no_think = _extract_thinking_effort_from_model(str(model_val))
             clean_model = _normalize_model(model_no_think) or str(model_val)
-            ordered: Dict[str, Any] = {"model": clean_model}
-            for k, v in payload.items():
-                if k != "model":
-                    ordered[k] = v
-            payload = ordered
+
+        ordered: Dict[str, Any] = {}
+        if clean_model:
+            ordered["model"] = clean_model
+        for preferred_key in ("contents", "systemInstruction", "tools", "generationConfig"):
+            if preferred_key in payload:
+                ordered[preferred_key] = payload[preferred_key]
+        for k, v in payload.items():
+            if k not in ordered and k != "model":
+                ordered[k] = v
+        payload = ordered
 
     return url, headers, payload
 
