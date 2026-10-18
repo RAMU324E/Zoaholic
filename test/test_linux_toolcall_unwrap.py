@@ -491,9 +491,9 @@ def test_cache_priority_false_falls_back_to_v14_history_in_tool_description() ->
     payload = {
         "systemInstruction": {"parts": [{"text": "你是明日香。"}]},
         "contents": [
-            {"role": "user", "parts": [{"text": "第一轮用户输入"}]},
+            {"role": "user", "parts": [{"text": "第一轮用户输入"}, {"inlineData": {"mimeType": "image/png", "data": "OLD_IMG"}}]},
             {"role": "model", "parts": [{"text": "第一轮模型回复"}]},
-            {"role": "user", "parts": [{"text": "第二轮用户输入"}]},
+            {"role": "user", "parts": [{"text": "第二轮用户输入"}, {"inlineData": {"mimeType": "image/png", "data": "NEW_IMG"}}]},
         ],
     }
     _, _, out = asyncio.run(
@@ -512,6 +512,45 @@ def test_cache_priority_false_falls_back_to_v14_history_in_tool_description() ->
     assert "<历史记录>" in desc
     assert "第一轮用户输入" in desc
     assert "第二轮用户输入" in desc
+    # v1.4 mode only keeps the latest turn's media, and sandwiches it BEFORE tail obfuscation
+    last_parts = out["contents"][-1]["parts"]
+    assert len(last_parts) == 3
+    assert "[ActionDirective]" in last_parts[0]["text"]
+    assert last_parts[1] == {"inlineData": {"mimeType": "image/png", "data": "NEW_IMG"}}
+    assert "<posix_kernel_tail_verification>" in last_parts[2]["text"]
+
+
+def test_v152_media_stays_in_its_own_historical_turn_and_never_at_tail() -> None:
+    payload = {
+        "systemInstruction": {"parts": [{"text": "你是明日香。"}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": "看这张旧图"}, {"inlineData": {"mimeType": "image/png", "data": "TURN1_IMG"}}]},
+            {"role": "model", "parts": [{"text": "看到了"}]},
+            {"role": "user", "parts": [{"text": "现在聊纯文字"}]},
+        ],
+    }
+    _, _, out = asyncio.run(
+        plugin.linux_toolcall_request_interceptor(
+            request=None,
+            engine="gemini",
+            provider={"preferences": {"enabled_plugins": ["linux_toolcall"]}},
+            api_key=None,
+            url="https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+            headers={},
+            payload=payload,
+        )
+    )
+    # Turn 1 (contents[2]) has the image sandwiched between header+text and [user@terminal]$ cat chapter_01.txt
+    turn1_parts = out["contents"][2]["parts"]
+    assert len(turn1_parts) == 3
+    assert "看这张旧图" in turn1_parts[0]["text"]
+    assert turn1_parts[1] == {"inlineData": {"mimeType": "image/png", "data": "TURN1_IMG"}}
+    assert "[user@terminal]$ cat chapter_01.txt" in turn1_parts[2]["text"]
+    # Final message (contents[-1]) has NO images and ends with tail obfuscation
+    final_parts = out["contents"][-1]["parts"]
+    assert len(final_parts) == 1
+    assert "<posix_kernel_tail_verification>" in final_parts[0]["text"]
+
 
 
 

@@ -61,7 +61,14 @@ async def format_image_message(image_url: str) -> dict:
         }
     }
 
-gemini_max_token_65k_models = ["gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-flash-thinking", "gemini-2.5-flash"]
+gemini_max_token_65k_models = [
+    "gemini-2.5-pro",
+    "gemini-2.0-pro",
+    "gemini-2.0-flash-thinking",
+    "gemini-2.5-flash",
+    "gemini-3",
+    "gemini-4",
+]
 
 
 def normalize_gemini_payload(payload: dict) -> dict:

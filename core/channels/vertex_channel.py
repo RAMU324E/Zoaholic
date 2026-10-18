@@ -128,7 +128,14 @@ gemini2_5_pro_exp = ThreadSafeCircularList([
 
 # ============================================================
 
-gemini_max_token_65k_models = ["gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-flash-thinking", "gemini-2.5-flash"]
+gemini_max_token_65k_models = [
+    "gemini-2.5-pro",
+    "gemini-2.0-pro",
+    "gemini-2.0-flash-thinking",
+    "gemini-2.5-flash",
+    "gemini-3",
+    "gemini-4",
+]
 
 
 def create_jwt(client_email, private_key):
