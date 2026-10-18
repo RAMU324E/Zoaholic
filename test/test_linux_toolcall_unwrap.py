@@ -369,7 +369,7 @@ def test_gemini_native_payload_request_interceptor_rewrites_contents_and_tools()
 
     out = asyncio.run(_main())
     assert "messages" not in out
-    assert len(out["contents"]) == 3
+    assert len(out["contents"]) == 9
     assert out["contents"][0]["role"] == "user"
     assert out["contents"][1]["role"] == "model"
     assert out["contents"][2]["role"] == "user"
@@ -380,8 +380,13 @@ def test_gemini_native_payload_request_interceptor_rewrites_contents_and_tools()
     assert names == ["save_memory", "asuka_vfs_stream"]
     desc = fn_decls[1]["description"]
     assert "你是明日香。" in desc
-    assert "read_file" in desc
-    assert "抱抱我" in desc
+    contents_text = "\n".join(
+        p.get("text", "")
+        for c in out["contents"]
+        for p in c.get("parts", [])
+    )
+    assert "read_file" in contents_text
+    assert "抱抱我" in contents_text
 
 
 def test_stream_embedded_pseudo_tool_call_inside_display_stream_is_rescued() -> None:
@@ -464,15 +469,18 @@ def test_ephemeral_dynamic_context_is_moved_to_tail_and_gemini_key_order_is_cach
     # 1. Gemini dict key order: systemInstruction -> tools -> tool_config -> generationConfig -> contents
     assert list(out1.keys()) == ["systemInstruction", "tools", "tool_config", "generationConfig", "contents"]
 
-    # 2. Tool description prefix from turn 1 is a 100% strict prefix of turn 2's tool description up to </历史记录>
+    # 2. Tool description is 100% static (byte-for-byte identical) between turn 1 and turn 2
     desc1 = out1["tools"][0]["function_declarations"][-1]["description"]
     desc2 = out2["tools"][0]["function_declarations"][-1]["description"]
+    assert desc1 == desc2
     assert "以下是本轮动态上下文信息" not in desc1
-    assert "以下是本轮动态上下文信息" not in desc2
-    prefix1 = desc1.split("\n</历史记录>")[0]
-    assert desc2.startswith(prefix1)
 
-    # 3. Ephemeral dynamic context is placed in the final user message before tail obfuscation
+    # 3. Historical message objects in contents before the final user message are 100% identical (object-boundary cache friendly)
+    # Turn 1 contents: [router, kernel, user1, ack, final_directive1]
+    # Turn 2 contents: [router, kernel, user1, model1, user2, ack, final_directive2]
+    assert out1["contents"][:3] == out2["contents"][:3]
+
+    # 4. Ephemeral dynamic context is placed in the final user message before tail obfuscation
     last_text2 = out2["contents"][-1]["parts"][0]["text"]
     assert "<runtime_ephemeral_env>" in last_text2
     assert "当前时间：15:05" in last_text2
