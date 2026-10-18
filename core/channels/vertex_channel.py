@@ -424,10 +424,10 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                 if getattr(tool_call, "id", None):
                     tool_call_name_map[tool_call.id] = tool_call.function.name
                 pending_fc_names.append(tool_call.function.name)
-                # thoughtSignature：优先从 tool_call.extra_content 取，首个 FC 兜底用消息级签名
+                # thoughtSignature：优先从 tool_call.extra_content 取，首个 FC 兜底用消息级签名或官方跳过校验标记
                 sig = (getattr(tool_call, "extra_content", {}) or {}).get("google", {}).get("thoughtSignature")
                 if not sig and i == 0:
-                    sig = msg_signature
+                    sig = msg_signature or "skip_thought_signature_validator"
                 if sig:
                     fc_part["thoughtSignature"] = sig
                     msg_signature = None

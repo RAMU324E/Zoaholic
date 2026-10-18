@@ -248,10 +248,10 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                 }
                 if getattr(tc, "id", None):
                     tool_call_name_map[tc.id] = tc.function.name
-                # 签名逻辑：第一个 FC 必须携带签名
+                # 签名逻辑：第一个 FC 必须携带签名；若历史消息无签名则用 Google 官方规定的跳过校验标记兜底
                 sig = (getattr(tc, "extra_content", {}) or {}).get("google", {}).get("thoughtSignature")
                 if not sig and i == 0:
-                    sig = msg_signature
+                    sig = msg_signature or "skip_thought_signature_validator"
                 
                 if sig:
                     part["thoughtSignature"] = sig

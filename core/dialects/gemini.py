@@ -321,10 +321,10 @@ async def render_gemini_response(
                 }
             }
             # 签名逻辑：第一个函数调用必须携带签名（如果是 Gemini 3 模型）
-            # 我们优先从 tool_call 的 extra_content 中找，或者使用消息级别的签名
+            # 我们优先从 tool_call 的 extra_content 中找，或者使用消息级别的签名，缺失时使用官方跳过校验标记兜底
             sig = (tc.get("extra_content") or {}).get("google", {}).get("thoughtSignature")
             if not sig and i == 0:
-                sig = msg.get("thoughtSignature")
+                sig = msg.get("thoughtSignature") or "skip_thought_signature_validator"
             
             if sig:
                 part["thoughtSignature"] = sig
