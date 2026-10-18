@@ -1,5 +1,5 @@
 """
-Factory AI 兼容插件 (factory_compat) v2.6.1
+Factory AI 兼容插件 (factory_compat) v2.6.2
 
 根据渠道引擎类型，为 Factory AI 上游请求拼接必要内容（基于 Droid CLI v0.244.0 实证）：
 - 幂等的合规 system prompt 注入（Droid + buffer，支持 Claude / OpenAI / Responses / Gemini，
@@ -40,7 +40,7 @@ from core.plugins import (
 # ==================== 默认常量与完整模型列表 ====================
 
 CONFIG_KEY = "factory_compat"
-PLUGIN_VERSION = "2.6.1"
+PLUGIN_VERSION = "2.6.2"
 
 # Factory 官方 release（2026-10-16）最新 Droid CLI 为 v0.244.0（含 gemini-4-argon 支持）。
 # 渠道可通过 preferences.factory_compat.cli_version 覆盖伪装版本。
@@ -398,32 +398,36 @@ def _extract_context_1m_suffix(model_name: Any) -> Tuple[Any, bool]:
 
 
 def _extract_provider_from_model(model_name: str) -> Tuple[Optional[str], str]:
-    """从模型名中提取云厂商供应商前缀/后缀。"""
+    """从模型名中提取云厂商供应商前缀/后缀（兼容末尾带 -fast 的组合如 claude-opus-4-7-ver-fast）。"""
     if not isinstance(model_name, str) or not model_name.strip():
         return None, model_name
 
     current = model_name.strip()
     detected_provider = None
 
+    # 若末尾带 -fast，先暂存 -fast 后缀，确保 -ver-fast / -bdrk-fast 能识别出供应商后缀
+    core_name, had_fast = _split_fast_suffix(current)
+
     for rule in PROVIDER_RULES:
-        p_match = rule["prefix"].search(current)
+        p_match = rule["prefix"].search(core_name)
         if p_match:
             detected_provider = rule["provider"]
-            current = current[p_match.end():].strip("-_:")
+            core_name = core_name[p_match.end():].strip("-_:")
 
-        s_match = rule["suffix"].search(current)
+        s_match = rule["suffix"].search(core_name)
         if s_match:
             detected_provider = rule["provider"]
-            current = current[:s_match.start()].strip("-_:")
+            core_name = core_name[:s_match.start()].strip("-_:")
 
         # 一个模型只能选择一个云厂商路由，避免混合别名被后续规则覆盖。
         if detected_provider:
             break
 
-    if not current:
+    if not core_name:
         return None, model_name
 
-    return detected_provider, current
+    rebuilt = f"{core_name}-fast" if (had_fast and detected_provider) else (core_name if detected_provider else current)
+    return detected_provider, rebuilt
 
 
 def _extract_thinking_effort_from_model(model_name: str) -> Tuple[Optional[str], str]:
@@ -470,6 +474,9 @@ def _normalize_model(
     m = CONTEXT_1M_SUFFIX_RE.search(base)
     if m:
         base = base[: m.start()].strip("-_:/ ")
+
+    # 2.5 剥离供应商路由前缀/后缀（如 vertex- / -ver / bedrock- / -bdrk）
+    _, base = _extract_provider_from_model(base)
 
     # 3. 剥离已知后缀与 thinking 后缀
     changed = True
@@ -924,6 +931,12 @@ def _apply_claude_beta_and_fast(
     if context_1m_requested and CONTEXT_1M_BETA not in beta_parts:
         beta_parts.append(CONTEXT_1M_BETA)
 
+    # [v2.5.1] -fast 后缀语法糖：无论走直连还是 Vertex/Bedrock，都需先把 -fast 从上游模型 ID 中剥离
+    base_model, fast_suffix_hit = _split_fast_suffix(model)
+    if fast_suffix_hit:
+        payload["model"] = base_model
+        model = base_model
+
     # 1. 云厂商路由（Vertex / Bedrock / Azure / Snowflake）：不发送直连路径专用 Fast / thinking beta。
     if api_provider in ("vertex_anthropic", "bedrock_anthropic", "azure_anthropic", "snowflake"):
         _set_header_ci(headers, "x-api-provider", api_provider)
@@ -957,11 +970,8 @@ def _apply_claude_beta_and_fast(
 
     fast_beta = _cfg_str(cfg, "fast_mode_beta", DEFAULT_FAST_MODE_BETA)
     client_speed = payload.get("speed")
-    # [v2.5.1] -fast 后缀语法糖：剥掉后缀发基础模型 + 注入 fast（零配置）
-    base_model, fast_suffix_hit = _split_fast_suffix(model)
     if fast_suffix_hit:
-        payload["model"] = base_model
-        logger.info(f"[factory_compat] -fast 语法糖: {model} -> {base_model} (+speed=fast)")
+        logger.info(f"[factory_compat] -fast 语法糖: {model}-fast -> {base_model} (+speed=fast)")
     is_fast = fast_suffix_hit or client_speed == "fast" or (
         client_speed is None and _model_matches(model, claude_models)
     )
@@ -1072,11 +1082,22 @@ async def factory_compat_request_interceptor(
     lowercase_system = _cfg_bool(cfg, "lowercase_system", False)
     strip_sampling_params = _cfg_bool(cfg, "strip_sampling_params", True)
 
-    # 1. CLI model[1m] 能力别名、供应商路由与渠道前缀归一化
+    # 1. CLI model[1m] 能力别名、渠道分组前缀剥离与供应商路由归一化
     model, context_1m_requested = _extract_context_1m_suffix(raw_model)
     if context_1m_requested and engine_lower not in GEMINI_ENGINES:
         payload["model"] = model
         logger.info(f"[factory_compat] 已将显式 1M context 模型别名归一化: {model}")
+
+    # 先剥离渠道分组前缀（如 factoryclaude/vertex-claude-opus-4-7、RP用-vertex-...），再提取供应商前后缀
+    low_m = str(model or "").lower()
+    for pref in DEFAULT_STRIP_PREFIXES:
+        if pref and low_m.startswith(pref.lower()):
+            stripped_m = str(model)[len(pref):].strip("-_:/ ")
+            if stripped_m:
+                model = stripped_m
+                if engine_lower not in GEMINI_ENGINES:
+                    payload["model"] = model
+            break
 
     detected_prov, base_model = _extract_provider_from_model(model)
     if detected_prov:
@@ -1093,10 +1114,10 @@ async def factory_compat_request_interceptor(
             model = clean_gemini_model
         payload["model"] = model
     else:
-        # 若模型名带有渠道分组前缀（如 factorygpt/gpt-5.6-sol、fac_open/glm-5.3），自动剥离前缀还原真实 ID
-        low_m = str(model or "").lower()
+        # 剥离供应商前缀后若仍带内层渠道前缀，再做一次清理
+        low_m2 = str(model or "").lower()
         for pref in DEFAULT_STRIP_PREFIXES:
-            if pref and low_m.startswith(pref.lower()):
+            if pref and low_m2.startswith(pref.lower()):
                 stripped_m = str(model)[len(pref):].strip("-_:/ ")
                 if stripped_m:
                     model = stripped_m
@@ -1116,14 +1137,25 @@ async def factory_compat_request_interceptor(
     )
     if isinstance(api_provider, str):
         api_prov_clean = api_provider.strip().lower()
-        if api_prov_clean in ("vertex", "ver", "vertex_anthropic"):
-            api_provider = "vertex_anthropic"
-        elif api_prov_clean in ("bedrock", "bdrk", "bedrock_anthropic"):
-            api_provider = "bedrock_anthropic"
-        elif api_prov_clean in ("azure", "az", "azure_anthropic"):
-            api_provider = "azure_anthropic"
-        elif api_prov_clean in ("snowflake", "sf"):
-            api_provider = "snowflake"
+        if engine_lower in GEMINI_ENGINES:
+            # Factory /api/llm/g/v1/generate 仅支持 google 作为 x-api-provider
+            if api_prov_clean in ("vertex", "ver", "vertex_anthropic", "google"):
+                api_provider = "google"
+        elif engine_lower in (OAI_ENGINES | RESPONSES_ENGINES):
+            # 对齐 droid.exe v0.244.0：OpenAI 模型在 Bedrock/Azure 下使用 bedrock_openai / azure_openai
+            if api_prov_clean in ("bedrock", "bdrk", "bedrock_anthropic", "bedrock_openai"):
+                api_provider = "bedrock_openai"
+            elif api_prov_clean in ("azure", "az", "azure_anthropic", "azure_openai"):
+                api_provider = "azure_openai"
+        else:
+            if api_prov_clean in ("vertex", "ver", "vertex_anthropic"):
+                api_provider = "vertex_anthropic"
+            elif api_prov_clean in ("bedrock", "bdrk", "bedrock_anthropic"):
+                api_provider = "bedrock_anthropic"
+            elif api_prov_clean in ("azure", "az", "azure_anthropic"):
+                api_provider = "azure_anthropic"
+            elif api_prov_clean in ("snowflake", "sf"):
+                api_provider = "snowflake"
 
     # 2. 注入 Factory 专有 headers
     _inject_factory_headers(headers, engine_lower, cli_version, extra_headers, api_key=api_key)

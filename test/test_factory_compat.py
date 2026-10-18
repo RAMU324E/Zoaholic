@@ -243,4 +243,32 @@ def test_claude_and_openai_fast_models_add_and_aliases_preserved():
         assert "temperature" not in payload_g
         assert "service_tier" not in payload_g
 
+        # 4. Channel prefix + Vertex prefix + -fast suffix (factoryclaude/vertex-claude-fable-5-1-fast -> claude-fable-5.1 @ vertex_anthropic)
+        headers_v = {"x-api-key": "fk-vertex"}
+        payload_v = {
+            "model": "factoryclaude/vertex-claude-fable-5-1-fast",
+            "max_tokens": 8192,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        _, headers_v, payload_v = await factory_compat_request_interceptor(
+            None, "claude", provider_claude, "fk-vertex", "https://api.factory.ai/api/llm/a/v1/messages", headers_v, payload_v
+        )
+        assert payload_v["model"] == "claude-fable-5.1"
+        assert headers_v["x-api-provider"] == "vertex_anthropic"
+        assert "speed" not in payload_v
+        assert headers_v.get("anthropic-beta") is None
+
+        # 5. OpenAI Responses Bedrock routing (gpt-5.4-bdrk -> gpt-5.4 @ bedrock_openai, no OpenAI-Platform header)
+        headers_b = {"Authorization": "Bearer fk-bdrk"}
+        payload_b = {
+            "model": "gpt-5.4-bdrk",
+            "input": "hi",
+        }
+        _, headers_b, payload_b = await factory_compat_request_interceptor(
+            None, "openai-responses", provider_oai, "fk-bdrk", "https://api.factory.ai/api/llm/o/v1/responses", headers_b, payload_b
+        )
+        assert payload_b["model"] == "gpt-5.4"
+        assert headers_b["x-api-provider"] == "bedrock_openai"
+        assert "OpenAI-Platform" not in headers_b
+
     asyncio.run(_run())
