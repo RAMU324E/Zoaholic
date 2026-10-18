@@ -487,4 +487,32 @@ def test_ephemeral_dynamic_context_is_moved_to_tail_and_gemini_key_order_is_cach
     assert last_text2.index("<runtime_ephemeral_env>") < last_text2.index("<posix_kernel_tail_verification>")
 
 
+def test_cache_priority_false_falls_back_to_v14_history_in_tool_description() -> None:
+    payload = {
+        "systemInstruction": {"parts": [{"text": "你是明日香。"}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": "第一轮用户输入"}]},
+            {"role": "model", "parts": [{"text": "第一轮模型回复"}]},
+            {"role": "user", "parts": [{"text": "第二轮用户输入"}]},
+        ],
+    }
+    _, _, out = asyncio.run(
+        plugin.linux_toolcall_request_interceptor(
+            request=None,
+            engine="gemini",
+            provider={"preferences": {"enabled_plugins": ["linux_toolcall:cache_priority=false"]}},
+            api_key=None,
+            url="https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+            headers={},
+            payload=payload,
+        )
+    )
+    assert len(out["contents"]) == 3
+    desc = out["tools"][0]["function_declarations"][-1]["description"]
+    assert "<历史记录>" in desc
+    assert "第一轮用户输入" in desc
+    assert "第二轮用户输入" in desc
+
+
+
 
