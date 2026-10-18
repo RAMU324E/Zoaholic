@@ -378,8 +378,7 @@ def test_gemini_native_payload_request_interceptor_rewrites_contents_and_tools()
     fn_decls = out["tools"][0]["function_declarations"]
     names = [d["name"] for d in fn_decls]
     assert names == ["save_memory", "asuka_vfs_stream"]
-    desc = fn_decls[1]["description"]
-    assert "你是明日香。" in desc
+    assert "你是明日香。" in out["systemInstruction"]["parts"][0]["text"]
     contents_text = "\n".join(
         p.get("text", "")
         for c in out["contents"]
