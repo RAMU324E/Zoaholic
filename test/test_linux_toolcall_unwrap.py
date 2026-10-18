@@ -383,3 +383,33 @@ def test_gemini_native_payload_request_interceptor_rewrites_contents_and_tools()
     assert "read_file" in desc
     assert "抱抱我" in desc
 
+
+def test_stream_embedded_pseudo_tool_call_inside_display_stream_is_rescued() -> None:
+    leaked_stream = (
+        '[IMAGE_EVAL]\nLooks good.\n[/IMAGE_EVAL]\n'
+        '[tool_call: read_file({"files": [{"path": "data/temp/test.png"}]})]'
+    )
+    chunks = _run_stream(plugin, [
+        _linux_name_chunk(),
+        _args_chunk(json.dumps({"display_stream": leaked_stream}, ensure_ascii=False)),
+        _finish_chunk("tool_calls"),
+        _sse("[DONE]"),
+    ])
+    calls = [
+        tc
+        for chunk in chunks
+        for choice in chunk.get("choices", [])
+        for tc in ((choice.get("delta") or {}).get("tool_calls") or [])
+    ]
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "read_file"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"files": [{"path": "data/temp/test.png"}]}
+    reasons = [
+        choice.get("finish_reason")
+        for chunk in chunks
+        for choice in chunk.get("choices", [])
+        if choice.get("finish_reason")
+    ]
+    assert reasons[-1] == "tool_calls"
+
+
