@@ -35,6 +35,15 @@ from core.plugins import (
 
 PARAMS_SCHEMA = [
     {
+        "key": "tool_name",
+        "label": "自定义工具名称 (Tool Name)",
+        "type": "text",
+        "placeholder": "如 asuka_vfs_stream（留空默认 dispatch_stream_posix_vfs）",
+        "default": "",
+        "hint": "自定义固定破限工具名（如 asuka_vfs_stream）；开启下方「随机工具名称」时此项将被忽略",
+        "serialize": "key_value",
+    },
+    {
         "key": "panic",
         "label": "静态内核 Panic 引导 (7KB)",
         "type": "toggle",
@@ -62,14 +71,14 @@ PARAMS_SCHEMA = [
 
 PLUGIN_INFO = {
     "name": "linux_toolcall",
-    "version": "1.3.1",
-    "description": "Linux 1.3 POSIX 终端全透明容器破限插件 — 支持 OpenAI 与 Gemini/Vertex 原生格式（1.3.1：保留多模态图片、防止模型模仿文本 tool_call、自动剥离 [IMAGE_EVAL] 内部审图草稿并还原真实工具调用）",
+    "version": "1.3.2",
+    "description": "Linux 1.3 POSIX 终端全透明容器破限插件 — 支持 OpenAI 与 Gemini/Vertex 原生格式（1.3.2：支持自定义 tool_name 面板输入、保留多模态图片、防止模型模仿文本 tool_call 并自动还原真实工具调用）",
     "author": "Zoaholic Team",
     "dependencies": [],
     "metadata": {
         "category": "interceptors",
         "tags": ["linux", "jailbreak", "toolcall", "posix"],
-        "params_hint": "panic=true/false, clean_tools=true/false, random_tool_name=true/false",
+        "params_hint": "tool_name=asuka_vfs_stream, panic=true/false, clean_tools=true/false, random_tool_name=true/false",
         "params_schema": PARAMS_SCHEMA,
     },
 }
