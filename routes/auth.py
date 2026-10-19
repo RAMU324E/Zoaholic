@@ -32,9 +32,10 @@ _login_failures_by_ip: dict[str, list[float]] = defaultdict(list)
 def _extract_login_client_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        ip = xff.split(",")[-1].strip()
-        if ip:
-            return ip
+        # 过滤尾部空项，避免 "1.2.3.4, " 这类头部回退到未校验的 X-Real-IP。
+        ips = [ip.strip() for ip in xff.split(",") if ip.strip()]
+        if ips:
+            return ips[-1]
     xri = request.headers.get("x-real-ip")
     if xri and xri.strip():
         return xri.strip()
@@ -56,6 +57,18 @@ def _check_login_rate_limit(client_ip: str) -> None:
 def _record_login_failure(client_ip: str) -> None:
     now = time.monotonic()
     cutoff = now - _LOGIN_FAIL_WINDOW_SECONDS
+    # 修改原因：失败记录按任意 XFF 值建键，攻击者可无限撑大内存。
+    # 修改方式：键数达到 512 后先清理过期 IP，并把总键数硬限制在 4096；超出时移除最早插入的键。
+    # 目的：保留防爆破窗口，同时给内存占用一个上限。
+    if len(_login_failures_by_ip) >= 512:
+        for ip in list(_login_failures_by_ip.keys()):
+            recent = [t for t in _login_failures_by_ip[ip] if t > cutoff]
+            if recent:
+                _login_failures_by_ip[ip] = recent
+            else:
+                _login_failures_by_ip.pop(ip, None)
+    while len(_login_failures_by_ip) >= 4096:
+        _login_failures_by_ip.pop(next(iter(_login_failures_by_ip)), None)
     recent = [t for t in _login_failures_by_ip.get(client_ip, []) if t > cutoff]
     recent.append(now)
     _login_failures_by_ip[client_ip] = recent

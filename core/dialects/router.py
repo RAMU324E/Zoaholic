@@ -91,22 +91,8 @@ async def _read_response_bytes(resp: "Response") -> bytes:
 
 def _create_dialect_verify_api_key(dialect_id: str):
     """为方言创建 API key 验证依赖"""
-    from core.auth import security, _extract_token
+    from core.auth import security, _extract_token, _resolve_admin_api_index
     from fastapi.security import HTTPAuthorizationCredentials
-
-    def _resolve_admin_api_index(app) -> int | None:
-        """当客户端使用 admin JWT 访问方言端点时，将其映射到配置中的 admin api_key 索引。"""
-        api_keys_db = getattr(app.state, "api_keys_db", None) or []
-        if isinstance(api_keys_db, list):
-            for i, item in enumerate(api_keys_db):
-                if not isinstance(item, dict):
-                    continue
-                role = str(item.get("role", "")).lower()
-                if "admin" in role:
-                    return i
-            if len(api_keys_db) == 1:
-                return 0
-        return None
 
     async def verify(
         request: Request,

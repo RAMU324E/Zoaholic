@@ -49,9 +49,9 @@ def _get_client_ip(websocket: WebSocket) -> str:
     """与 StatsMiddleware 相同的客户端 IP 解析优先级（取反代追加的最右侧 IP 防伪造）。"""
     forwarded_for = websocket.headers.get("x-forwarded-for")
     if forwarded_for:
-        real_ip = forwarded_for.split(",")[-1].strip()
-        if real_ip:
-            return real_ip
+        ips = [ip.strip() for ip in forwarded_for.split(",") if ip.strip()]
+        if ips:
+            return ips[-1]
     real_ip_header = websocket.headers.get("x-real-ip")
     if real_ip_header:
         return real_ip_header.strip()
@@ -79,6 +79,15 @@ def _authenticate(websocket: WebSocket) -> tuple[Optional[int], Optional[str], O
     try:
         api_index = api_list.index(token)
     except ValueError:
+        return None, None, "Invalid or missing API Key"
+
+    # 修改原因：BYOK 模板 Key（byok-xxx-*）只是本地身份前缀，不能直接作为上游凭证使用。
+    # 修改方式：与 HTTP 路径一致，精确命中 BYOK 模板时视为鉴权失败。
+    # 目的：防止客户端只提交裸模板 Key 绕过 BYOK 真实上游 Key 校验。
+    from core.byok import is_byok_api_key
+    if is_byok_api_key(getattr(app.state, "api_keys_db", []), api_index):
+        api_index = None
+    if api_index is None:
         return None, None, "Invalid or missing API Key"
 
     if is_api_key_disabled(app, api_index):

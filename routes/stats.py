@@ -16,6 +16,7 @@ from db import RequestStat, ChannelStat, async_session_scope, DISABLE_DATABASE, 
 from core.stats import get_usage_data, compute_total_cost_from_db
 from utils import safe_get, query_channel_key_stats
 from routes.deps import rate_limit_dependency, verify_api_key, verify_admin_api_key, get_app
+from core.auth import _extract_token, _is_admin_jwt_token
 from core.d1_client import parse_d1_datetime, format_d1_datetime
 
 router = APIRouter()
@@ -1841,10 +1842,16 @@ async def get_token_usage(
     app = get_app()
     requesting_token = safe_get(app.state.config, 'api_keys', api_index, "api", default="")
 
-    # 判断是否为管理员
-    is_admin = False
-    if hasattr(app.state, "admin_api_key") and requesting_token in app.state.admin_api_key:
-        is_admin = True
+    # 修改原因：原判断只看 admin_api_key，admin JWT 以及未命中明文列表的管理员会被当作普通用户。
+    # 修改方式：同时识别 admin JWT 与最新 admin_api_key 列表；两者都不命中且无法确定 Key 时拒绝访问。
+    # 目的：避免未授权的请求读取他人 token 统计，同时支持控制台 JWT 查看全量统计。
+    raw_token = await _extract_token(request)
+    admin_keys = getattr(app.state, "admin_api_key", None) or []
+    is_admin = _is_admin_jwt_token(raw_token) or (
+        bool(requesting_token) and requesting_token in admin_keys
+    )
+    if not is_admin and not requesting_token:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 确定 API key 过滤器
     filter_api_key = None

@@ -59,6 +59,24 @@ async def rate_limit_dependency(request: Request):
         raise HTTPException(status_code=429, detail="Too many requests")
 
 
+def compute_admin_api_keys(api_keys_db: list) -> list[str]:
+    """计算允许作为管理员明文凭证的 API Key 列表（绝不包含显式 role='user' 的 Key）。"""
+    if not isinstance(api_keys_db, list) or not api_keys_db:
+        return []
+    admin_keys = [
+        str(item.get("api"))
+        for item in api_keys_db
+        if isinstance(item, dict) and item.get("api") and "admin" in str(item.get("role", "") or "").lower()
+    ]
+    if admin_keys:
+        return admin_keys
+    if len(api_keys_db) == 1 and isinstance(api_keys_db[0], dict) and api_keys_db[0].get("api"):
+        first_role = str(api_keys_db[0].get("role", "") or "").strip().lower()
+        if not first_role:
+            return [str(api_keys_db[0]["api"])]
+    return []
+
+
 def _resolve_admin_api_index(app) -> Optional[int]:
     """从当前 app.state.api_keys_db 中解析 admin key 的索引。
 
@@ -69,17 +87,28 @@ def _resolve_admin_api_index(app) -> Optional[int]:
     """
 
     api_keys_db = getattr(app.state, "api_keys_db", None) or []
-    if isinstance(api_keys_db, list):
-        for i, item in enumerate(api_keys_db):
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role", "")).lower()
-            if "admin" in role:
-                return i
+    if not isinstance(api_keys_db, list):
+        return None
 
-        # 未显式标注 admin role 时与 main.py / routes/auth.py 保持一致，默认将首个有效 key 视为 admin
-        if len(api_keys_db) >= 1 and isinstance(api_keys_db[0], dict) and api_keys_db[0].get("api"):
-            return 0
+    # 1) 优先显式 admin role
+    for i, item in enumerate(api_keys_db):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "") or "").lower()
+        if "admin" in role:
+            return i
+
+    # 2) 没有 admin role 时，选择第一个未显式标注 user 的有效 Key
+    for i, item in enumerate(api_keys_db):
+        if not isinstance(item, dict) or not item.get("api"):
+            continue
+        role = str(item.get("role", "") or "").strip().lower()
+        if "user" not in role:
+            return i
+
+    # 3) 兜底：首个有效 Key
+    if api_keys_db and isinstance(api_keys_db[0], dict) and api_keys_db[0].get("api"):
+        return 0
 
     return None
 
@@ -291,12 +320,10 @@ async def verify_admin_api_key(
         # 目的：管理端和用户端都遵守同一层级的访问控制规则。
         raise_ip_blocked()
 
-    # 单 key 情况直接视为 admin
-    if len(api_list) == 1:
+    # 修改原因：旧逻辑把所有单 Key 部署都视为 admin，role=user 的明文 Key 可借此提权。
+    # 修改方式：仅显式 admin role，或唯一且未标注 role 的 Key 可作为管理员明文凭证。
+    # 目的：阻止 role=user 的 Key 访问管理接口。
+    role = str(app.state.api_keys_db[api_index].get("role", "") or "").strip().lower()
+    if "admin" in role or (len(api_list) == 1 and not role):
         return token
-
-    # 检查配置中的角色
-    if "admin" not in app.state.api_keys_db[api_index].get("role", ""):
-        raise HTTPException(status_code=403, detail="Permission denied")
-
-    return token
+    raise HTTPException(status_code=403, detail="Permission denied")

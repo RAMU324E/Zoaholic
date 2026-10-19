@@ -39,6 +39,7 @@ from core.streaming import LoggingStreamingResponse
 from core.request import get_payload
 from core.response import fetch_response, fetch_response_stream, check_response
 from core.stats import batch_update_channel_stats, update_channel_stats, enqueue_stats
+from db import DISABLE_DATABASE
 from core.models import (
     RequestModel,
     ImageGenerationRequest,
@@ -606,6 +607,17 @@ class ModelRequestHandler:
                     reject_reason = quota_registry.check(final_api_key, request_model_name, client_ip=_client_ip)
                     if reject_reason:
                         raise HTTPException(status_code=429, detail=reject_reason)
+                # 修改原因：付费 Key 余额耗尽后只在后台显示 enabled=False，网关仍会继续放行。
+                # 修改方式：在 quota_registry 检查之后、旧限速之前读取 paid_api_keys_states.enabled。
+                # 目的：余额不足的 Key 在请求入口直接返回 429，避免继续产生费用。
+                if not DISABLE_DATABASE:
+                    paid_states = getattr(self.app.state, "paid_api_keys_states", None)
+                    paid_state = paid_states.get(final_api_key) if isinstance(paid_states, dict) else None
+                    if isinstance(paid_state, dict) and paid_state.get("enabled") is False:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Balance is insufficient, please check your account.",
+                        )
                 await self.app.state.user_api_keys_rate_limit[final_api_key].next(request_model_name)
             except HTTPException:
                 raise

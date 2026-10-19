@@ -88,6 +88,11 @@ async def _persist_config(app, sections_to_verify=None, changed_providers=None):
             save_to_db=save_to_db,
             changed_providers=changed_providers,
         )
+        # 修改原因：admin_api_key 只在启动时计算，管理端保存 api_keys 后不热更新会导致统计权限误判。
+        # 修改方式：与 main.py 复用同一 compute_admin_api_keys（排除显式 role=user 的 Key）。
+        # 目的：保存配置后管理员明文凭证列表立即与最新 api_keys_db 同步。
+        from core.auth import compute_admin_api_keys
+        app.state.admin_api_key = compute_admin_api_keys(app.state.api_keys_db)
         # 修改原因：update_config 保持三元返回，BYOK 前缀表属于运行时派生状态。
         # 修改方式：热更新配置后基于最新 api_keys_db 重建 app.state.byok_prefixes。
         # 目的：管理端保存 BYOK 通配符 key 后，标准和方言鉴权立即生效。

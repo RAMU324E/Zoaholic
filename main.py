@@ -692,14 +692,8 @@ async def lifespan(app: FastAPI):
             app.state.needs_setup = True
             app.state.admin_api_key = []
         else:
-            app.state.admin_api_key = []
-            for item in app.state.api_keys_db:
-                if "admin" in item.get("role", ""):
-                    app.state.admin_api_key.append(item.get("api"))
-            if app.state.admin_api_key == []:
-                # 兼容旧配置：如果没显式标记 admin，就默认第一把 key 为 admin
-                if len(app.state.api_keys_db) >= 1:
-                    app.state.admin_api_key = [app.state.api_keys_db[0].get("api")]
+            from core.auth import compute_admin_api_keys
+            app.state.admin_api_key = compute_admin_api_keys(app.state.api_keys_db)
 
         app.state.provider_timeouts = init_preference(app.state.config, "model_timeout", DEFAULT_TIMEOUT)
         app.state.keepalive_interval = init_preference(app.state.config, "keepalive_interval", DEFAULT_KEEPALIVE_INTERVAL)

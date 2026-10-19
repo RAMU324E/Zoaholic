@@ -305,6 +305,23 @@ async def _apply_response_path_interceptors(
     if is_stream:
         from core.stream_errors import observe_stream_chunk
         info = request_info.get()
+        if (
+            info
+            and info.get("_stream_committed")
+            and isinstance(response_chunk, dict)
+            and "error" in response_chunk
+        ):
+            # 修改原因：首包已提交后的流式中途错误不会再回到 handler 重试，而是直接渲染给客户端。
+            # 修改方式：在记录/返回前先执行渠道与 Key 出站拦截器。
+            # 目的：已提交的流式错误与正常响应一样经过插件脱敏，避免上游原文泄露。
+            response_chunk = await apply_channel_outbound_interceptors(
+                response_chunk, engine, model, provider or {}, is_stream=is_stream, enabled_plugins=enabled_plugins
+            )
+            response_chunk = await apply_key_outbound_interceptors(
+                response_chunk, engine, model, api_key_info or {}, is_stream=is_stream, enabled_plugins=key_enabled_plugins
+            )
+            await observe_stream_chunk(info, response_chunk)
+            return response_chunk
         if info:
             await observe_stream_chunk(info, response_chunk)
 

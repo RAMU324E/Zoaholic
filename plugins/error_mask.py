@@ -24,6 +24,8 @@ from core.log_config import logger
 from core.plugins import (
     register_response_interceptor,
     unregister_response_interceptor,
+    register_channel_outbound_interceptor,
+    unregister_channel_outbound_interceptor,
     register_key_outbound_interceptor,
     unregister_key_outbound_interceptor,
     get_current_plugin_options,
@@ -31,7 +33,7 @@ from core.plugins import (
 
 PLUGIN_INFO = {
     "name": "error_mask",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "屏蔽上游错误详情，替换为统一的安全提示语，防止内部信息泄露（支持渠道级与单 Key 级配置）",
     "author": "Zoaholic Team",
     "dependencies": [],
@@ -53,6 +55,7 @@ PLUGIN_INFO = {
 
 EXTENSIONS = [
     "interceptors:error_mask_response",
+    "interceptors:error_mask_channel_outbound",
     "interceptors:error_mask_key_outbound",
 ]
 
@@ -67,6 +70,24 @@ def _mask_error_dict(chunk: dict, mask_msg: str) -> dict:
     2) 最终 JSONResponse 格式: {"error": {"message": "...", "type": "...", ...}}
     """
     masked = dict(chunk)
+    # 修改原因：OpenAI Responses 的 response.failed 事件把真实错误放在 response.error 内。
+    # 修改方式：先按顶层 error 相同规则脱敏嵌套 message/details/status，且不凭空添加顶层 error。
+    # 目的：同时覆盖 Chat/Responses 两种错误结构。
+    response_obj = masked.get("response")
+    if isinstance(response_obj, dict) and isinstance(response_obj.get("error"), dict):
+        response_copy = dict(response_obj)
+        error_copy = dict(response_copy["error"])
+        if "message" in error_copy:
+            error_copy["message"] = mask_msg
+        if "details" in error_copy:
+            del error_copy["details"]
+        if "status" in error_copy:
+            error_copy["status"] = "error"
+        response_copy["error"] = error_copy
+        masked["response"] = response_copy
+        if "error" not in masked:
+            return masked
+
     err_val = masked.get("error")
     if isinstance(err_val, dict):
         err_copy = dict(err_val)
@@ -109,8 +130,22 @@ def _mask_json_string(text: str, mask_msg: str) -> str:
         return text
 
     error_obj = data.get("error")
-    if error_obj is None:
+    response_obj = data.get("response")
+    nested_error_obj = response_obj.get("error") if isinstance(response_obj, dict) else None
+    if error_obj is None and not isinstance(nested_error_obj, dict):
         return text
+
+    # OpenAI Responses response.failed 事件：错误位于 response.error，需要同样脱敏。
+    if isinstance(nested_error_obj, dict):
+        if "message" in nested_error_obj:
+            nested_error_obj["message"] = mask_msg
+        if "details" in nested_error_obj:
+            del nested_error_obj["details"]
+        if "status" in nested_error_obj:
+            nested_error_obj["status"] = "error"
+
+    if error_obj is None:
+        return json.dumps(data, ensure_ascii=False)
 
     if isinstance(error_obj, dict):
         if "message" in error_obj:
@@ -146,19 +181,22 @@ async def error_mask_response_interceptor(
     # custom_options 是 error_mask: 后面的内容，如果有的话
     mask_msg = custom_options.strip('"').strip("'") if custom_options else DEFAULT_MESSAGE
 
-    # dict 类型：底层 check_response 返回的错误
-    if isinstance(response_chunk, dict) and "error" in response_chunk:
-        logger.debug(f"[error_mask] Masking error dict for model={model}")
-        return _mask_error_dict(response_chunk, mask_msg)
+    # dict 类型：底层 check_response 返回的错误，或 Responses response.failed 事件
+    if isinstance(response_chunk, dict):
+        response_obj = response_chunk.get("response")
+        has_nested_error = isinstance(response_obj, dict) and isinstance(response_obj.get("error"), dict)
+        if "error" in response_chunk or has_nested_error:
+            logger.debug(f"[error_mask] Masking error dict for model={model}")
+            return _mask_error_dict(response_chunk, mask_msg)
 
     # str 类型：透传模式的原始文本
     if isinstance(response_chunk, str):
         # 快速判断：如果不包含 "error" 关键字，大概率不是错误响应，直接放行
-        if '"error"' not in response_chunk:
+        if '"error"' not in response_chunk and "response.failed" not in response_chunk:
             return response_chunk
 
-        # SSE 格式可能包含多行 data:，逐行检查
-        if response_chunk.startswith("data: "):
+        # SSE 格式可能包含多行 data:，逐行检查；保留 event: 行（Claude/Responses 错误事件）
+        if "data: " in response_chunk:
             lines = response_chunk.split("\n")
             masked_lines = []
             changed = False
@@ -186,6 +224,18 @@ async def error_mask_response_interceptor(
 
     # 其他类型（结构化响应对象等），不处理
     return response_chunk
+
+
+async def error_mask_channel_outbound_interceptor(
+    response_chunk: Any,
+    engine: str,
+    model: str,
+    provider: Dict[str, Any],
+    is_stream: bool,
+    enabled_plugins: Optional[List[str]] = None,
+) -> Any:
+    """渠道出站拦截器：在 Key Rules 之后、返回客户端前再次屏蔽错误详情。"""
+    return await error_mask_response_interceptor(response_chunk, engine, model, is_stream)
 
 
 async def error_mask_key_outbound_interceptor(
@@ -217,12 +267,20 @@ def setup(manager):
         plugin_name=PLUGIN_INFO["name"],
         metadata={"stage": "key_outbound", "description": "按 API Key 屏蔽上游错误详情，替换为安全提示语"},
     )
+    register_channel_outbound_interceptor(
+        interceptor_id="error_mask_channel_outbound",
+        callback=error_mask_channel_outbound_interceptor,
+        priority=10,
+        plugin_name=PLUGIN_INFO["name"],
+        metadata={"stage": "channel_outbound", "description": "渠道错误响应返回客户端前屏蔽上游错误详情"},
+    )
 
-    logger.info(f"[{PLUGIN_INFO['name']}] Response & Key outbound interceptors registered")
+    logger.info(f"[{PLUGIN_INFO['name']}] Response, channel & Key outbound interceptors registered")
 
 
 def teardown(manager):
     logger.info(f"[{PLUGIN_INFO['name']}] Cleaning up...")
     unregister_response_interceptor("error_mask_response")
+    unregister_channel_outbound_interceptor("error_mask_channel_outbound")
     unregister_key_outbound_interceptor("error_mask_key_outbound")
     logger.info(f"[{PLUGIN_INFO['name']}] Cleaned up")
