@@ -172,10 +172,10 @@ class StatsMiddleware:
         """
         headers_dict = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in headers}
 
-        # X-Forwarded-For: client, proxy1, proxy2 —— 取第一个
+        # X-Forwarded-For: client, proxy1, proxy2 —— 单层本机反代（Caddy）下取最右侧追加的真实连接 IP，防止客户端伪造头部绕过黑名单与限流
         forwarded_for = headers_dict.get("x-forwarded-for")
         if forwarded_for:
-            real_ip = forwarded_for.split(",")[0].strip()
+            real_ip = forwarded_for.split(",")[-1].strip()
             if real_ip:
                 return real_ip
 

@@ -200,8 +200,8 @@ async def setup_init(payload: SetupInitRequest = Body(...)):
     admin_user = await _get_admin_user()
     has_config = bool(getattr(app.state, "api_list", None))
 
-    # 如果配置和管理员账号都已存在，则拒绝重复初始化
-    if has_config and admin_user is not None:
+    # 如果配置或管理员账号任一已存在，拒绝未授权重复初始化/抢注
+    if has_config or admin_user is not None:
         raise HTTPException(status_code=409, detail="Already initialized")
 
     # 1) 写入/更新管理员账号 + 生成并持久化 JWT secret（用户无需手动配置 JWT_SECRET 环境变量）
@@ -322,9 +322,12 @@ async def setup_init(payload: SetupInitRequest = Body(...)):
 
 @router.post("/login", response_model=SetupLoginResponse)
 async def setup_login(payload: SetupLoginRequest = Body(...)):
-    """使用管理员账号密码登录，返回管理员 API Key（兼容现有前端基于 API Key 的鉴权）。"""
-
+    """已初始化完成后禁止通过 /setup/login 直接获取明文 admin_api_key，统一走 /auth/login JWT。"""
+    app = get_app()
+    has_config = bool(getattr(app.state, "api_list", None))
     admin_user = await _get_admin_user()
+    if has_config and admin_user is not None:
+        raise HTTPException(status_code=403, detail="Setup is already completed. Please use /auth/login.")
     if admin_user is None:
         raise HTTPException(status_code=404, detail="Admin user not initialized")
 

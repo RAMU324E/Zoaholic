@@ -495,7 +495,7 @@ async def process_request_passthrough(
         # 目的：避免透传请求路径因 provider 名不存在而产生长期驻留的空 ThreadSafeCircularList。
         circular_list = provider_api_circular_list.get(provider["provider"])
         if not circular_list:
-            raise HTTPException(status_code=404, detail=f"Provider '{provider['provider']}' API key pool not found")
+            raise HTTPException(status_code=404, detail="Upstream provider API key pool not found")
         api_key = await circular_list.next(original_model)
     else:
         api_key = None

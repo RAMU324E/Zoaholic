@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,7 @@ def _b64url_decode(data: str) -> bytes:
 
 
 _CACHED_SECRET: Optional[str] = None
+_FALLBACK_RANDOM_SECRET: str = secrets.token_urlsafe(48)
 
 
 def set_jwt_secret(secret: str) -> None:
@@ -45,7 +47,7 @@ def _jwt_secret() -> str:
     if env:
         return env
 
-    return "dev-insecure-jwt-secret"
+    return _FALLBACK_RANDOM_SECRET
 
 
 def issue_jwt(payload: Dict[str, Any], *, expires_in_seconds: int = 7 * 24 * 3600) -> str:

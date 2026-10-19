@@ -8,6 +8,8 @@
 """
 
 import os
+import time
+from collections import defaultdict
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -20,6 +22,43 @@ from db import DISABLE_DATABASE, async_session_scope, AdminUser, DB_TYPE
 
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+# 登录防爆破限流：单 IP 10 分钟内最多允许 5 次失败尝试
+_LOGIN_FAIL_WINDOW_SECONDS = 600
+_LOGIN_FAIL_MAX_ATTEMPTS = 5
+_login_failures_by_ip: dict[str, list[float]] = defaultdict(list)
+
+
+def _extract_login_client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        ip = xff.split(",")[-1].strip()
+        if ip:
+            return ip
+    xri = request.headers.get("x-real-ip")
+    if xri and xri.strip():
+        return xri.strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - _LOGIN_FAIL_WINDOW_SECONDS
+    recent = [t for t in _login_failures_by_ip.get(client_ip, []) if t > cutoff]
+    if recent:
+        _login_failures_by_ip[client_ip] = recent
+    else:
+        _login_failures_by_ip.pop(client_ip, None)
+    if len(recent) >= _LOGIN_FAIL_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Please try again later.")
+
+
+def _record_login_failure(client_ip: str) -> None:
+    now = time.monotonic()
+    cutoff = now - _LOGIN_FAIL_WINDOW_SECONDS
+    recent = [t for t in _login_failures_by_ip.get(client_ip, []) if t > cutoff]
+    recent.append(now)
+    _login_failures_by_ip[client_ip] = recent
 
 
 class LoginRequest(BaseModel):
@@ -61,7 +100,10 @@ def _select_admin_api_key_from_config(conf: dict) -> Optional[str]:
 
 
 @router.post("/login", response_model=LoginResponse, dependencies=[Depends(rate_limit_dependency)])
-async def login(payload: LoginRequest = Body(...)):
+async def login(request: Request, payload: LoginRequest = Body(...)):
+    client_ip = _extract_login_client_ip(request)
+    _check_login_rate_limit(client_ip)
+
     if DISABLE_DATABASE:
         raise HTTPException(status_code=500, detail="Database is disabled; cannot login.")
 
@@ -96,10 +138,14 @@ async def login(payload: LoginRequest = Body(...)):
         raise HTTPException(status_code=404, detail="Admin user not initialized. Please visit /setup.")
 
     if admin_user.username != payload.username:
+        _record_login_failure(client_ip)
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
     if not verify_password(payload.password, admin_user.password_hash):
+        _record_login_failure(client_ip)
         raise HTTPException(status_code=403, detail="Invalid username or password")
+
+    _login_failures_by_ip.pop(client_ip, None)
 
     token = issue_jwt({"sub": admin_user.username, "role": "admin"})
 

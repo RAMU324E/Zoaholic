@@ -1,6 +1,9 @@
 import asyncio
 import base64
+import ipaddress
 import mimetypes
+import socket
+import urllib.parse
 from typing import Optional
 
 import httpx
@@ -65,9 +68,34 @@ async def _get_shared_fetch_client() -> httpx.AsyncClient:
             transport=transport,
             limits=limits,
             timeout=timeout,
-            follow_redirects=True,
+            follow_redirects=False,
         )
         return _shared_fetch_client
+
+
+def _validate_safe_public_url(url: str) -> None:
+    """校验 URL 仅指向公网 HTTP(S) 地址，防止 SSRF 探测本机/局域网/容器内网/云元数据。"""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Only public http/https URLs are allowed")
+    host = parsed.hostname.strip().lower()
+    if host in ("localhost", "localhost.localdomain") or host.endswith(".local") or host.endswith(".internal"):
+        raise ValueError("Internal hostnames are not allowed")
+    infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    if not infos:
+        raise ValueError("Unable to resolve host")
+    for info in infos:
+        ip_str = info[4][0]
+        ip_obj = ipaddress.ip_address(ip_str)
+        if (
+            ip_obj.is_loopback
+            or ip_obj.is_private
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        ):
+            raise ValueError("Access to private or internal IP addresses is forbidden")
 
 
 async def close_shared_fetch_client() -> None:
@@ -81,12 +109,19 @@ async def close_shared_fetch_client() -> None:
 async def fetch_url_content(url: str) -> tuple[bytes, str]:
     client = await _get_shared_fetch_client()
     try:
-        response = await client.get(url)
-        response.raise_for_status()
-        content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
-        return response.content, content_type
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch file from url: {url}. Error: {str(e)}")
+        current_url = url
+        for _ in range(4):
+            await asyncio.to_thread(_validate_safe_public_url, current_url)
+            response = await client.get(current_url)
+            if response.is_redirect and response.headers.get("location"):
+                current_url = urllib.parse.urljoin(current_url, response.headers["location"])
+                continue
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
+            return response.content, content_type
+        raise ValueError("Too many redirects")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to fetch file from the provided URL.")
 
 
 async def get_base64_file(file_url_or_data: str) -> tuple[str, str]:

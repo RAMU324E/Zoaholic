@@ -956,7 +956,7 @@ class ModelRequestHandler:
                 # 但当前 provider 与入口方言不匹配（透传未启用），
                 # 直接跳过该 provider，不发送任何真实上游请求。
                 if passthrough_only and not (passthrough_ctx and passthrough_ctx.enabled):
-                    error_message = f"Endpoint {endpoint} requires passthrough mode, but provider {provider_name} is not compatible"
+                    error_message = f"Endpoint {endpoint} requires passthrough mode, but the selected upstream provider is not compatible"
                     status_code = 501
                     continue
 

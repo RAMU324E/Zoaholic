@@ -46,10 +46,10 @@ async def _send_error_frame(websocket: WebSocket, status: int, message: str,
 
 
 def _get_client_ip(websocket: WebSocket) -> str:
-    """与 StatsMiddleware 相同的客户端 IP 解析优先级。"""
+    """与 StatsMiddleware 相同的客户端 IP 解析优先级（取反代追加的最右侧 IP 防伪造）。"""
     forwarded_for = websocket.headers.get("x-forwarded-for")
     if forwarded_for:
-        real_ip = forwarded_for.split(",")[0].strip()
+        real_ip = forwarded_for.split(",")[-1].strip()
         if real_ip:
             return real_ip
     real_ip_header = websocket.headers.get("x-real-ip")

@@ -973,7 +973,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to close shared fetch client: {e}")
 
-app = FastAPI(lifespan=lifespan, debug=is_debug)
+_enable_docs = env_bool("ENABLE_DOCS", False)
+app = FastAPI(
+    lifespan=lifespan,
+    debug=is_debug,
+    docs_url="/docs" if _enable_docs else None,
+    redoc_url="/redoc" if _enable_docs else None,
+    openapi_url="/openapi.json" if _enable_docs else None,
+)
 app.include_router(api_router)
 app.include_router(oauth_router)
 
@@ -1009,7 +1016,7 @@ def generate_markdown_docs():
 
     return markdown
 
-@app.get("/docs/markdown")
+@app.get("/docs/markdown", dependencies=[Depends(verify_admin_api_key)])
 async def get_markdown_docs():
     markdown = generate_markdown_docs()
     return Response(
