@@ -1016,7 +1016,10 @@ def generate_markdown_docs():
 
     return markdown
 
-@app.get("/docs/markdown", dependencies=[Depends(verify_admin_api_key)])
+from fastapi import Depends as _FastAPIDepends
+from core.auth import verify_admin_api_key as _verify_admin_api_key
+
+@app.get("/docs/markdown", dependencies=[_FastAPIDepends(_verify_admin_api_key)])
 async def get_markdown_docs():
     markdown = generate_markdown_docs()
     return Response(
