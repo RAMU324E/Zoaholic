@@ -133,6 +133,18 @@ def test_single_key_admin_fallback_matches_existing_auth_contract(gateway):
     assert response.json()['stats_key'] == 'admin-jwt'
 
 
+def test_multi_key_without_explicit_admin_role_falls_back_to_first_key(gateway):
+    entries = [{'api': 'first-owner-key', 'name': 'my'}, {'api': 'second-friend-key', 'name': 'friend'}]
+    gateway.state.api_keys_db = entries
+    gateway.state.config['api_keys'] = entries
+    gateway.state.api_list = ['first-owner-key', 'second-friend-key']
+    token = jwt.issue_jwt({'sub': 'fixture-admin', 'role': 'admin'})
+    for path in ['/v1/test-admin', '/v1/test-key']:
+        response = call(gateway, token, path)
+        assert response.status_code == 200
+        assert response.json()['stats_key'] == ('admin-jwt' if path == '/v1/test-admin' else 'first-owner-key')
+
+
 def test_login_token_reaches_protected_management_route(gateway, monkeypatch):
     # Exercise the real /auth/login handler without production DB or credentials.
     user = SimpleNamespace(username='fixture-admin', password_hash=hash_password('fixture-password'), jwt_secret=None)

@@ -77,8 +77,8 @@ def _resolve_admin_api_index(app) -> Optional[int]:
             if "admin" in role:
                 return i
 
-        # 单 key 情况默认视为 admin
-        if len(api_keys_db) == 1:
+        # 未显式标注 admin role 时与 main.py / routes/auth.py 保持一致，默认将首个有效 key 视为 admin
+        if len(api_keys_db) >= 1 and isinstance(api_keys_db[0], dict) and api_keys_db[0].get("api"):
             return 0
 
     return None
