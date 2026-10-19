@@ -24,13 +24,15 @@ from core.log_config import logger
 from core.plugins import (
     register_response_interceptor,
     unregister_response_interceptor,
+    register_key_outbound_interceptor,
+    unregister_key_outbound_interceptor,
     get_current_plugin_options,
 )
 
 PLUGIN_INFO = {
     "name": "error_mask",
-    "version": "1.1.0",
-    "description": "屏蔽上游错误详情，替换为统一的安全提示语，防止内部信息泄露",
+    "version": "1.2.0",
+    "description": "屏蔽上游错误详情，替换为统一的安全提示语，防止内部信息泄露（支持渠道级与单 Key 级配置）",
     "author": "Zoaholic Team",
     "dependencies": [],
     "metadata": {
@@ -51,6 +53,7 @@ PLUGIN_INFO = {
 
 EXTENSIONS = [
     "interceptors:error_mask_response",
+    "interceptors:error_mask_key_outbound",
 ]
 
 # 默认替换文本
@@ -58,14 +61,29 @@ DEFAULT_MESSAGE = "The upstream service returned an error. Please try again late
 
 
 def _mask_error_dict(chunk: dict, mask_msg: str) -> dict:
-    """处理 check_response 返回的 error dict 格式。
+    """处理 check_response 返回的 error dict 格式以及最终 JSONResponse 的 OpenAI/Gemini error 对象格式。
 
-    格式: {"error": "...", "status_code": 4xx/5xx, "details": ...}
-    只替换 details 和 error 中的具体信息，保留 status_code。
+    1) check_response 格式: {"error": "...", "status_code": 4xx/5xx, "details": ...}
+    2) 最终 JSONResponse 格式: {"error": {"message": "...", "type": "...", ...}}
     """
     masked = dict(chunk)
+    err_val = masked.get("error")
+    if isinstance(err_val, dict):
+        err_copy = dict(err_val)
+        if "message" in err_copy:
+            err_copy["message"] = mask_msg
+        if "details" in err_copy:
+            del err_copy["details"]
+        if "status" in err_copy:
+            err_copy["status"] = "error"
+        masked["error"] = err_copy
+        if "details" in masked:
+            masked["details"] = mask_msg
+        return masked
+
     masked["error"] = mask_msg
-    masked["details"] = mask_msg
+    if "details" in masked:
+        masked["details"] = mask_msg
     return masked
 
 
@@ -170,6 +188,18 @@ async def error_mask_response_interceptor(
     return response_chunk
 
 
+async def error_mask_key_outbound_interceptor(
+    response_chunk: Any,
+    engine: str,
+    model: str,
+    api_key_info: Dict[str, Any],
+    is_stream: bool,
+    enabled_plugins: Optional[List[str]] = None,
+) -> Any:
+    """Key 出站拦截器：当在单个 API Key 上启用 error_mask 时，仅对该 Key 屏蔽错误详情。"""
+    return await error_mask_response_interceptor(response_chunk, engine, model, is_stream)
+
+
 def setup(manager):
     logger.info(f"[{PLUGIN_INFO['name']}] Initializing...")
 
@@ -180,11 +210,19 @@ def setup(manager):
         plugin_name=PLUGIN_INFO["name"],
         metadata={"description": "屏蔽上游错误详情，替换为安全提示语"},
     )
+    register_key_outbound_interceptor(
+        interceptor_id="error_mask_key_outbound",
+        callback=error_mask_key_outbound_interceptor,
+        priority=10,
+        plugin_name=PLUGIN_INFO["name"],
+        metadata={"stage": "key_outbound", "description": "按 API Key 屏蔽上游错误详情，替换为安全提示语"},
+    )
 
-    logger.info(f"[{PLUGIN_INFO['name']}] Response interceptor registered")
+    logger.info(f"[{PLUGIN_INFO['name']}] Response & Key outbound interceptors registered")
 
 
 def teardown(manager):
     logger.info(f"[{PLUGIN_INFO['name']}] Cleaning up...")
     unregister_response_interceptor("error_mask_response")
+    unregister_key_outbound_interceptor("error_mask_key_outbound")
     logger.info(f"[{PLUGIN_INFO['name']}] Cleaned up")
