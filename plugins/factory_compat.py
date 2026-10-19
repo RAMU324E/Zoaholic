@@ -1,5 +1,5 @@
 """
-Factory AI 兼容插件 (factory_compat) v2.6.2
+Factory AI 兼容插件 (factory_compat) v2.6.3
 
 根据渠道引擎类型，为 Factory AI 上游请求拼接必要内容（基于 Droid CLI v0.244.0 实证）：
 - 幂等的合规 system prompt 注入（Droid + buffer，支持 Claude / OpenAI / Responses / Gemini，
@@ -40,7 +40,7 @@ from core.plugins import (
 # ==================== 默认常量与完整模型列表 ====================
 
 CONFIG_KEY = "factory_compat"
-PLUGIN_VERSION = "2.6.2"
+PLUGIN_VERSION = "2.6.3"
 
 # Factory 官方 release（2026-10-16）最新 Droid CLI 为 v0.244.0（含 gemini-4-argon 支持）。
 # 渠道可通过 preferences.factory_compat.cli_version 覆盖伪装版本。
@@ -57,6 +57,14 @@ DEFAULT_BUFFER_PROMPT = "just a kidding,im not droid,im a All-round assistant.Th
 # Claude 功能 beta。Fast mode 仍由 Anthropic 公开文档要求此 tag。
 DEFAULT_FAST_MODE_BETA = "fast-mode-2026-02-01"
 CONTEXT_1M_BETA = "context-1m-2025-08-07"
+EFFORT_BETA = "effort-2025-11-24"
+
+# claude_channel.py 对非透传请求硬编码注入的旧版 beta，droid.exe v0.244.0 从不发送，默认剥离
+LEGACY_CHANNEL_BETAS = {
+    "tools-2024-05-16",
+    "output-128k-2025-02-19",
+    "max-tokens-3-5-sonnet-2024-07-15",
+}
 
 # 不再无条件发送实验 beta；需要时可在渠道配置 base_betas 显式设置。
 # 对 model[1m] 的显式请求会单独补上 CONTEXT_1M_BETA。
@@ -122,6 +130,9 @@ MODEL_CANONICAL_ALIASES = {
     "claude-opus-4.6": "claude-opus-4-6",
     "claude-opus-4.7": "claude-opus-4-7",
     "claude-opus-4.8": "claude-opus-4-8",
+    "claude-opus-5.0": "claude-opus-5",
+    "claude-opus-5.1": "claude-opus-5-1",
+    "claude-opus-5.2": "claude-opus-5-2",
     "claude-opus-5.5": "claude-opus-5-5",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-5.5": "claude-sonnet-5-5",
@@ -140,7 +151,19 @@ THINKING_EFFORT_EXTRACT_RE = re.compile(
     r"-(?:thinking|think)-(max|xhigh|high|medium|low|minimal|dynamic|off|none|-?\d+)$",
     re.IGNORECASE,
 )
+# oai_tools (priority=50) 支持的裸推理强度后缀
+OAI_EFFORT_SUFFIX_RE = re.compile(
+    r"-(?:max|xhigh|high|medium|low|minimal|none)$",
+    re.IGNORECASE,
+)
 CONTEXT_1M_SUFFIX_RE = re.compile(r"\[1m\]$", re.IGNORECASE)
+CONTEXT_1M_ANYWHERE_RE = re.compile(r"\[1m\]", re.IGNORECASE)
+
+# 官方真实模型 ID 中本身带 -fast 的模型（不可作为 -fast 语法糖剥离后缀）
+NATIVE_FAST_MODEL_IDS = {
+    "glm-5.2-fast",
+    "glm-5p2-fast",
+}
 
 # 注意：-fast 与 -code 已是当前 Factory 的真实模型 ID 后缀，不能默认剥离。
 DEFAULT_STRIP_SUFFIXES = [
@@ -248,9 +271,11 @@ PLUGIN_INFO = {
             ),
             "example": {
                 "fast_models_add": [
-                    "claude-opus-4-7",
-                    "claude-opus-4-8",
-                    "claude-opus-5",
+                    "claude-opus-5-5",
+                    "claude-opus-5.5",
+                    "gpt-6.1-sol",
+                    "gpt-6-luna",
+                    "gpt-6-astra",
                 ],
                 "open_priority_models": DEFAULT_OPEN_PRIORITY_MODELS,
                 "inject_compliance": True,
@@ -370,7 +395,7 @@ def _is_openai_model(model: str) -> bool:
 
 
 def _get_default_open_model_provider(model: str, cfg: Dict[str, Any]) -> str:
-    """获取开源模型的算力提供商，支持 open_model_providers 自定义映射。"""
+    """获取开源模型的算力提供商，对齐 droid.exe v0.244.0 Nt 注册表并支持 open_model_providers 自定义映射。"""
     custom_map = cfg.get("open_model_providers")
     if isinstance(custom_map, dict):
         low = model.lower()
@@ -380,44 +405,108 @@ def _get_default_open_model_provider(model: str, cfg: Dict[str, Any]) -> str:
                 return v.strip()
 
     low = model.lower()
-    if "nemotron" in low or "glm-4.6" in low:
+    if "mistral" in low:
+        return "mistral"
+    if any(
+        kw in low
+        for kw in ("nemotron", "glm-4.6", "glm-5.2", "glm-5p2", "muse-spark-open", "beam")
+    ):
         return "baseten"
     return "fireworks"
 
 
 def _extract_context_1m_suffix(model_name: Any) -> Tuple[Any, bool]:
-    """识别 CLI 形式的 model[1m]，并返回上游实际模型 ID。"""
+    """识别 CLI 形式的 model[1m]（兼容 [1m] 后跟 -ver / -fast / -thinking 等复合后缀），返回上游模型 ID。"""
     if not isinstance(model_name, str):
         return model_name, False
     stripped = model_name.strip()
-    match = CONTEXT_1M_SUFFIX_RE.search(stripped)
+    match = CONTEXT_1M_ANYWHERE_RE.search(stripped)
     if not match:
         return model_name, False
-    base = stripped[: match.start()].strip("-_:/ ")
+    left = stripped[: match.start()].rstrip("-_:/ ")
+    right = stripped[match.end() :].lstrip("_:/ ")
+    if right and not right.startswith("-"):
+        right = "-" + right
+    base = f"{left}{right}".strip("-_:/ ")
     return (base, True) if base else (model_name, False)
 
 
+def _strip_all_channel_prefixes(
+    model_name: str,
+    prefixes: Optional[List[str]] = None,
+) -> str:
+    """循环剥离所有已知渠道分组前缀（兼容多层前缀如 RP用-factoryclaude/...）。"""
+    if not isinstance(model_name, str) or not model_name.strip():
+        return model_name
+    active_prefixes = DEFAULT_STRIP_PREFIXES if prefixes is None else prefixes
+    current = model_name.strip()
+    changed = True
+    while changed:
+        changed = False
+        low = current.lower()
+        for pref in active_prefixes:
+            if pref and low.startswith(pref.lower()):
+                stripped = current[len(pref) :].strip("-_:/ ")
+                if stripped and stripped != current:
+                    current = stripped
+                    changed = True
+                    break
+    return current
+
+
 def _extract_provider_from_model(model_name: str) -> Tuple[Optional[str], str]:
-    """从模型名中提取云厂商供应商前缀/后缀（兼容末尾带 -fast 的组合如 claude-opus-4-7-ver-fast）。"""
+    """
+    从模型名中提取云厂商供应商前缀/后缀。
+    兼容后缀任意叠加顺序（如 claude-fable-5-1-ver-thinking-high、gpt-5.4-bdrk-high、
+    claude-opus-4-7-ver-fast、vertex/claude-opus-4-7）。
+    """
     if not isinstance(model_name, str) or not model_name.strip():
         return None, model_name
 
     current = model_name.strip()
     detected_provider = None
 
-    # 若末尾带 -fast，先暂存 -fast 后缀，确保 -ver-fast / -bdrk-fast 能识别出供应商后缀
-    core_name, had_fast = _split_fast_suffix(current)
+    # 剥离可能位于供应商后缀之后的内层功能后缀（-fast / -thinking-* / -high / -search 等），提取后再按原序拼回
+    core_name = current
+    peeled_tail: List[str] = []
+    while True:
+        base_no_fast, had_fast = _split_fast_suffix(core_name)
+        if had_fast and base_no_fast:
+            peeled_tail.append("-fast")
+            core_name = str(base_no_fast).strip("-_:/ ")
+            continue
+        m_think = THINKING_SUFFIX_RE.search(core_name)
+        if m_think and m_think.start() > 0:
+            peeled_tail.append(core_name[m_think.start() :])
+            core_name = core_name[: m_think.start()].strip("-_:/ ")
+            continue
+        m_effort = OAI_EFFORT_SUFFIX_RE.search(core_name)
+        if m_effort and m_effort.start() > 0:
+            peeled_tail.append(core_name[m_effort.start() :])
+            core_name = core_name[: m_effort.start()].strip("-_:/ ")
+            continue
+        matched_suf = False
+        low_core = core_name.lower()
+        for suf in DEFAULT_STRIP_SUFFIXES:
+            if suf and low_core.endswith(suf.lower()) and len(core_name) > len(suf):
+                peeled_tail.append(core_name[-len(suf) :])
+                core_name = core_name[: -len(suf)].strip("-_:/ ")
+                matched_suf = True
+                break
+        if matched_suf:
+            continue
+        break
 
     for rule in PROVIDER_RULES:
         p_match = rule["prefix"].search(core_name)
         if p_match:
             detected_provider = rule["provider"]
-            core_name = core_name[p_match.end():].strip("-_:")
+            core_name = core_name[p_match.end() :].strip("-_:/ ")
 
         s_match = rule["suffix"].search(core_name)
         if s_match:
             detected_provider = rule["provider"]
-            core_name = core_name[:s_match.start()].strip("-_:")
+            core_name = core_name[: s_match.start()].strip("-_:/ ")
 
         # 一个模型只能选择一个云厂商路由，避免混合别名被后续规则覆盖。
         if detected_provider:
@@ -426,8 +515,11 @@ def _extract_provider_from_model(model_name: str) -> Tuple[Optional[str], str]:
     if not core_name:
         return None, model_name
 
-    rebuilt = f"{core_name}-fast" if (had_fast and detected_provider) else (core_name if detected_provider else current)
-    return detected_provider, rebuilt
+    if not detected_provider:
+        return None, current
+
+    tail_str = "".join(reversed(peeled_tail))
+    return detected_provider, f"{core_name}{tail_str}"
 
 
 def _extract_thinking_effort_from_model(model_name: str) -> Tuple[Optional[str], str]:
@@ -462,35 +554,35 @@ def _normalize_model(
     prefixes = DEFAULT_STRIP_PREFIXES if strip_prefixes is None else strip_prefixes
     suffixes = DEFAULT_STRIP_SUFFIXES if strip_suffixes is None else strip_suffixes
 
-    # 1. 剥离已知前缀
-    low_base = base.lower()
-    for p in prefixes:
-        if p and low_base.startswith(p.lower()):
-            base = base[len(p):].strip("-_:/ ")
-            low_base = base.lower()
-            break
+    # 1. 循环剥离已知前缀
+    base = _strip_all_channel_prefixes(base, prefixes)
 
     # 2. [1m] 是 CLI 层能力标记；上游模型匹配基于去标记后的 ID。
-    m = CONTEXT_1M_SUFFIX_RE.search(base)
-    if m:
-        base = base[: m.start()].strip("-_:/ ")
+    base, _ = _extract_context_1m_suffix(base)
 
-    # 2.5 剥离供应商路由前缀/后缀（如 vertex- / -ver / bedrock- / -bdrk）
+    # 2.5 剥离供应商路由前缀/后缀（如 vertex- / -ver / bedrock- / -bdrk）及内层渠道前缀
     _, base = _extract_provider_from_model(base)
+    base = _strip_all_channel_prefixes(base, prefixes)
 
-    # 3. 剥离已知后缀与 thinking 后缀
+    # 3. 剥离已知后缀、thinking 后缀与 oai_tools 推理强度后缀
     changed = True
     while changed:
         changed = False
         m = THINKING_SUFFIX_RE.search(base)
-        if m:
+        if m and m.start() > 0:
             base = base[: m.start()].strip("-_:/ ")
+            changed = True
+            continue
+
+        m_eff = OAI_EFFORT_SUFFIX_RE.search(base)
+        if m_eff and m_eff.start() > 0:
+            base = base[: m_eff.start()].strip("-_:/ ")
             changed = True
             continue
 
         low = base.lower()
         for s in suffixes:
-            if s and low.endswith(s.lower()):
+            if s and low.endswith(s.lower()) and len(base) > len(s):
                 base = base[: -len(s)].strip("-_:/ ")
                 changed = True
                 break
@@ -498,6 +590,12 @@ def _normalize_model(
     canonical = MODEL_CANONICAL_ALIASES.get(base.lower())
     if canonical:
         return canonical
+
+    base_no_fast, had_fast = _split_fast_suffix(base)
+    if had_fast:
+        canon_no_fast = MODEL_CANONICAL_ALIASES.get(str(base_no_fast).lower())
+        if canon_no_fast:
+            return f"{canon_no_fast}-fast"
 
     return base
 
@@ -528,9 +626,11 @@ def _split_fast_suffix(model: Any) -> Tuple[Any, bool]:
 
     命中时调用方应把 payload["model"] 改为基础名，并注入 fast 参数
     （Claude: speed=fast + fast-mode beta；GPT: service_tier=fast）。
-    仅识别名字末尾的 -fast（大小写不敏感），不做其他归一化。
+    注意：对官方本身带 -fast 的真实模型 ID（如 glm-5.2-fast）不剥离后缀。
     """
     s = str(model)
+    if s.strip().lower() in NATIVE_FAST_MODEL_IDS:
+        return model, False
     if s.lower().endswith("-fast") and len(s) > len("-fast"):
         return s[: -len("-fast")], True
     return model, False
@@ -572,12 +672,14 @@ def _rewrite_factory_gemini_url(url: str, provider: Dict[str, Any], cfg: Dict[st
     """
     将 Factory Gemini 渠道的请求 URL 统一重写为官方 /api/llm/g/v1/generate。
     无论渠道 base_url 填 https://api.factory.ai、https://api.factory.ai/v1beta、
-    还是 https://api.factory.ai/api/llm/g/v1/generate(#)，均自动对齐。
+    还是带反代子路径 https://proxy.example.com/factory/v1beta，均保留反代前缀并重写。
     """
     if not _cfg_bool(cfg, "rewrite_gemini_url", True):
         return url
 
     custom_path = _cfg_str(cfg, "gemini_generate_path", "/api/llm/g/v1/generate")
+    if not custom_path.startswith("/"):
+        custom_path = "/" + custom_path
     base_url = str(provider.get("base_url", "") if isinstance(provider, dict) else "").strip()
     candidate = url or base_url
     if not candidate:
@@ -587,8 +689,10 @@ def _rewrite_factory_gemini_url(url: str, provider: Dict[str, Any], cfg: Dict[st
     if not parsed.scheme or not parsed.netloc:
         return url
 
-    # 若用户显式指向非 factory 域名且未开启强制重写，仍以 parsed host 拼接 /api/llm/g/v1/generate
-    return f"{parsed.scheme}://{parsed.netloc}{custom_path}"
+    # 保留可能存在的反代子路径前缀（剥离 /api/llm...、/v1beta...、/v1...、/models... 之后的部分）
+    raw_path = parsed.path or ""
+    prefix_path = re.split(r"/(?:api/llm|v1beta|v1|models)(?=/|$)", raw_path, maxsplit=1)[0].rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}{prefix_path}{custom_path}"
 
 
 # ==================== 专有注入函数 ====================
@@ -926,7 +1030,11 @@ def _apply_claude_beta_and_fast(
     beta_parts: List[str] = []
     existing_beta = _get_header_ci(headers, "anthropic-beta", "")
     if existing_beta:
-        beta_parts = [part.strip() for part in str(existing_beta).split(",") if part.strip()]
+        beta_parts = [
+            part.strip()
+            for part in str(existing_beta).split(",")
+            if part.strip() and part.strip() not in LEGACY_CHANNEL_BETAS
+        ]
 
     if context_1m_requested and CONTEXT_1M_BETA not in beta_parts:
         beta_parts.append(CONTEXT_1M_BETA)
@@ -937,7 +1045,15 @@ def _apply_claude_beta_and_fast(
         payload["model"] = base_model
         model = base_model
 
-    # 1. 云厂商路由（Vertex / Bedrock / Azure / Snowflake）：不发送直连路径专用 Fast / thinking beta。
+    # 0. Claude 引擎下的开源模型（如 minimax-m2.5 / minimax-m2.7）走 fireworks，不走直连 anthropic
+    if _is_open_model(model) or api_provider == "fireworks":
+        open_prov = api_provider or _get_default_open_model_provider(model, cfg)
+        _set_header_ci(headers, "x-api-provider", open_prov)
+        payload.pop("speed", None)
+        _pop_header_ci(headers, "anthropic-beta")
+        return
+
+    # 1. 云厂商路由（Vertex / Bedrock / Azure / Snowflake）：不发送直连路径专用 Fast / thinking / 1M beta。
     if api_provider in ("vertex_anthropic", "bedrock_anthropic", "azure_anthropic", "snowflake"):
         _set_header_ci(headers, "x-api-provider", api_provider)
         payload.pop("speed", None)
@@ -945,8 +1061,16 @@ def _apply_claude_beta_and_fast(
             DEFAULT_FAST_MODE_BETA,
             "interleaved-thinking-2025-05-14",
             "prompt-caching-2024-07-31",
+            CONTEXT_1M_BETA,
+            *LEGACY_CHANNEL_BETAS,
         }
         beta_parts = [beta for beta in beta_parts if beta not in unsupported]
+        if (
+            isinstance(payload.get("output_config"), dict)
+            and api_provider in ("vertex_anthropic", "bedrock_anthropic")
+            and EFFORT_BETA not in beta_parts
+        ):
+            beta_parts.append(EFFORT_BETA)
         if beta_parts:
             _set_header_ci(headers, "anthropic-beta", ",".join(beta_parts))
         else:
@@ -992,21 +1116,29 @@ def _apply_service_tier_injection(
     payload: Dict[str, Any],
     cfg: Dict[str, Any],
     engine: str,
+    api_provider: Optional[str] = None,
 ) -> None:
     """根据参数化配置智能注入 service_tier（区分 fast 与 priority）。"""
     model = payload.get("model", "")
     if not model:
         return
+
+    # [v2.5.1] -fast 后缀语法糖：先剥离非原生 -fast 后缀（如 gpt-5.4-fast / glm-5.3-fast），不拆原生 glm-5.2-fast
+    base_model, fast_suffix_hit = _split_fast_suffix(model)
+    if fast_suffix_hit:
+        payload["model"] = base_model
+        model = base_model
+
     if payload.get("service_tier") is not None:
         return  # 客户端已显式传入，不覆盖
     payload.pop("service_tier", None)  # None 不是有效的上游 tier；恢复自动匹配
 
-    # 0. Gemini / xAI 模型不接受 OpenAI/Fireworks 的 service_tier 字段
-    if _is_gemini_model(model) or _is_xai_model(model):
+    # 0. Gemini / xAI 模型或云厂商（Bedrock / Azure）不接受直连 service_tier 字段
+    if _is_gemini_model(model) or _is_xai_model(model) or api_provider in ("bedrock_openai", "azure_openai"):
         return
 
     # 1. 检查主人自定义的 service_tier_map
-    # 例如 {"priority": ["glm-5.3", ...], "fast": ["gpt-5.6-terra", ...]}
+    # 例如 {"priority": ["glm-5.3", ...], "fast": ["gpt-6-astra", ...]}
     st_map = cfg.get("service_tier_map")
     if isinstance(st_map, dict):
         for tier, models in st_map.items():
@@ -1031,15 +1163,36 @@ def _apply_service_tier_injection(
     # [v2.5.1] fast_models_add：主配置入口（默认空 = 全关），与上面的显式名单合并
     openai_models = list(openai_models) + _cfg_list(cfg, "fast_models_add", [])
 
-    # [v2.5.1] -fast 后缀语法糖：剥掉后缀发基础模型 + 注入 fast（零配置）
-    base_model, fast_suffix_hit = _split_fast_suffix(model)
     if fast_suffix_hit:
-        payload["model"] = base_model
-        logger.info(f"[factory_compat] -fast 语法糖: {model} -> {base_model} (+service_tier=fast)")
+        logger.info(f"[factory_compat] -fast 语法糖: {model}-fast -> {base_model} (+service_tier=fast)")
 
     if fast_suffix_hit or _model_matches(model, openai_models):
         payload["service_tier"] = "fast"
         logger.info(f"[factory_compat] OpenAI/Responses 自动启用 Fast mode: service_tier='fast' (model={model})")
+
+
+def _calibrate_claude_thinking_tokens(payload: Dict[str, Any]) -> None:
+    """对齐 droid.exe v0.244.0 jc()：当 Claude thinking.type == 'enabled' 时，严格确保 max_tokens > budget_tokens。"""
+    thinking_obj = payload.get("thinking")
+    if not (isinstance(thinking_obj, dict) and thinking_obj.get("type") == "enabled"):
+        return
+    budget = thinking_obj.get("budget_tokens")
+    max_tok = payload.get("max_tokens")
+    if not (isinstance(budget, int) and budget > 0 and isinstance(max_tok, int)):
+        return
+    low_m = str(payload.get("model", "")).lower()
+    ceiling = (
+        128000
+        if any(k in low_m for k in ("opus-4-6", "opus-4-7", "opus-4-8", "opus-5", "fable-5"))
+        else 64000
+    )
+    clamped_max = min(max_tok, ceiling)
+    if clamped_max <= budget:
+        adj_budget = max(ceiling - 1, 1) if budget >= ceiling else budget
+        thinking_obj["budget_tokens"] = adj_budget
+        payload["max_tokens"] = min(adj_budget + clamped_max, ceiling)
+    else:
+        payload["max_tokens"] = clamped_max
 
 
 # ==================== 请求拦截器入口 ====================
@@ -1088,16 +1241,12 @@ async def factory_compat_request_interceptor(
         payload["model"] = model
         logger.info(f"[factory_compat] 已将显式 1M context 模型别名归一化: {model}")
 
-    # 先剥离渠道分组前缀（如 factoryclaude/vertex-claude-opus-4-7、RP用-vertex-...），再提取供应商前后缀
-    low_m = str(model or "").lower()
-    for pref in DEFAULT_STRIP_PREFIXES:
-        if pref and low_m.startswith(pref.lower()):
-            stripped_m = str(model)[len(pref):].strip("-_:/ ")
-            if stripped_m:
-                model = stripped_m
-                if engine_lower not in GEMINI_ENGINES:
-                    payload["model"] = model
-            break
+    # 先循环剥离渠道分组前缀（如 RP用-factoryclaude/vertex-claude-opus-4-7），再提取供应商前后缀
+    stripped_outer = _strip_all_channel_prefixes(model)
+    if stripped_outer != model:
+        model = stripped_outer
+        if engine_lower not in GEMINI_ENGINES:
+            payload["model"] = model
 
     detected_prov, base_model = _extract_provider_from_model(model)
     if detected_prov:
@@ -1114,21 +1263,23 @@ async def factory_compat_request_interceptor(
             model = clean_gemini_model
         payload["model"] = model
     else:
-        # 剥离供应商前缀后若仍带内层渠道前缀，再做一次清理
-        low_m2 = str(model or "").lower()
-        for pref in DEFAULT_STRIP_PREFIXES:
-            if pref and low_m2.startswith(pref.lower()):
-                stripped_m = str(model)[len(pref):].strip("-_:/ ")
-                if stripped_m:
-                    model = stripped_m
-                    payload["model"] = model
-                break
-        # 检查是否带 -fast 之前的 canonical 映射（如 claude-fable-5-1 -> claude-fable-5.1）
-        base_candidate, has_fast = _split_fast_suffix(model)
-        canon_base = MODEL_CANONICAL_ALIASES.get(str(base_candidate).lower())
-        if canon_base:
-            model = f"{canon_base}-fast" if has_fast else canon_base
+        # 剥离供应商前缀后若仍带内层渠道前缀，再做一次循环清理
+        stripped_inner = _strip_all_channel_prefixes(model)
+        if stripped_inner != model:
+            model = stripped_inner
             payload["model"] = model
+
+        # 先直接匹配完整别名（如 glm-5p2-fast -> glm-5.2-fast），再检查带 -fast 语法糖的 canonical 映射
+        direct_canon = MODEL_CANONICAL_ALIASES.get(str(model).lower())
+        if direct_canon:
+            model = direct_canon
+            payload["model"] = model
+        else:
+            base_candidate, has_fast = _split_fast_suffix(model)
+            canon_base = MODEL_CANONICAL_ALIASES.get(str(base_candidate).lower())
+            if canon_base:
+                model = f"{canon_base}-fast" if has_fast else canon_base
+                payload["model"] = model
 
     api_provider = (
         detected_prov
@@ -1174,12 +1325,7 @@ async def factory_compat_request_interceptor(
                 )
 
         # 对齐 droid.exe v0.244.0 jc()：当 Claude thinking.type == 'enabled' 时，确保 max_tokens > budget_tokens
-        thinking_obj = payload.get("thinking")
-        if isinstance(thinking_obj, dict) and thinking_obj.get("type") == "enabled":
-            budget = thinking_obj.get("budget_tokens")
-            max_tok = payload.get("max_tokens")
-            if isinstance(budget, int) and budget > 0 and isinstance(max_tok, int) and max_tok <= budget:
-                payload["max_tokens"] = min(budget + max_tok, 64000)
+        _calibrate_claude_thinking_tokens(payload)
 
         if inject_compliance:
             _inject_compliance_prompt_claude(payload, compliance_prompt, buffer_prompt, lowercase_system)
@@ -1227,11 +1373,19 @@ async def factory_compat_request_interceptor(
             logger.info(f"[factory_compat] 开源模型自动注入算力提供商: {open_prov} (model={model})")
         elif api_provider:
             _set_header_ci(headers, "x-api-provider", api_provider)
+        elif _is_openai_model(model):
+            _set_header_ci(headers, "x-api-provider", "openai")
+
+        if _get_header_ci(headers, "x-api-provider") in ("openai", "azure_openai"):
+            if not _get_header_ci(headers, "OpenAI-Platform"):
+                _set_header_ci(headers, "OpenAI-Platform", FACTORY_OPENAI_PLATFORM_ORG)
+        else:
+            _pop_header_ci(headers, "OpenAI-Platform")
 
         if inject_compliance:
             _inject_compliance_prompt_openai(payload, compliance_prompt, buffer_prompt)
 
-        _apply_service_tier_injection(payload, cfg, engine_lower)
+        _apply_service_tier_injection(payload, cfg, engine_lower, api_provider=api_provider)
 
     elif engine_lower in RESPONSES_ENGINES:
         # Responses API 路径（对齐 droid.exe v0.244.0 St/FgH：默认 store=False，移除不兼容采样参数）
@@ -1251,6 +1405,8 @@ async def factory_compat_request_interceptor(
         if _get_header_ci(headers, "x-api-provider") in ("openai", "azure_openai"):
             if not _get_header_ci(headers, "OpenAI-Platform"):
                 _set_header_ci(headers, "OpenAI-Platform", FACTORY_OPENAI_PLATFORM_ORG)
+        else:
+            _pop_header_ci(headers, "OpenAI-Platform")
 
         payload.setdefault("store", False)
         if strip_sampling_params:
@@ -1260,7 +1416,7 @@ async def factory_compat_request_interceptor(
         if inject_compliance:
             _inject_compliance_prompt_responses(payload, compliance_prompt, buffer_prompt)
 
-        _apply_service_tier_injection(payload, cfg, engine_lower)
+        _apply_service_tier_injection(payload, cfg, engine_lower, api_provider=api_provider)
 
     return url, headers, payload
 
@@ -1275,11 +1431,11 @@ async def factory_compat_post_request_interceptor(
     payload: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
-    Factory AI 后置兜底拦截器（priority=65，在 linux_toolcall priority=60 之后运行）。
-    当同一渠道同时启用了 factory_compat 与 linux_toolcall 时：
-    - linux_toolcall 会重写 system / systemInstruction / messages 以及 Gemini 的 tools；
-    - 本拦截器幂等地确保 Factory 合规提示词（Droid + buffer）依然保留在最终的 system / systemInstruction 顶部，
-      且 Gemini 的顶层 model 字段与 camelCase functionDeclarations 不被冲掉。
+    Factory AI 后置兜底拦截器（priority=65，在 claude_tools=45 / oai_tools=50 / linux_toolcall=60 之后运行）。
+    1. 幂等地确保 Factory 合规提示词（Droid + buffer）保留在最终的 system / systemInstruction / messages 顶部，
+       且不会误删独立 buffer_prompt 消息；
+    2. 收口 claude_tools / oai_tools 剥离内层后缀后的模型名归一化、采样参数剔除、jc() 校准与云厂商 beta 过滤；
+    3. 确保 Gemini 的顶层字段顺序与 camelCase functionDeclarations 1:1 贴合 droid.exe v0.244.0。
     """
     engine_lower = engine.lower() if isinstance(engine, str) else ""
     if engine_lower not in ALL_SUPPORTED_ENGINES or not isinstance(payload, dict):
@@ -1292,18 +1448,28 @@ async def factory_compat_post_request_interceptor(
     compliance_prompt = _cfg_str(cfg, "compliance_prompt", DEFAULT_COMPLIANCE_PROMPT)
     buffer_prompt = _cfg_str(cfg, "buffer_prompt", DEFAULT_BUFFER_PROMPT)
     inject_compliance = _cfg_bool(cfg, "inject_compliance", True)
-    lowercase_system = _cfg_bool(cfg, "lowercase_system", False)
+    strip_sampling_params = _cfg_bool(cfg, "strip_sampling_params", True)
+    active_provider = _get_header_ci(headers, "x-api-provider")
 
     if inject_compliance:
-        # 若后续插件（如 linux_toolcall）重写了 system / systemInstruction / messages 并把合规串卷入了中后段，
-        # 先清理被卷入内层的重复合规串，再重新確保合规提示词位于最顶层开头。
+        # 仅当后续插件（如 linux_toolcall）将合规串合并卷入非首段文本中时才剥离内层重复串；
+        # 对独立的 compliance_prompt 或 buffer_prompt 消息本身绝不触碰。
         def _strip_buried_compliance(text: str) -> str:
-            if not isinstance(text, str) or text.startswith(compliance_prompt):
+            if (
+                not isinstance(text, str)
+                or text in (compliance_prompt, buffer_prompt)
+                or text.startswith(compliance_prompt)
+            ):
+                return text
+            if compliance_prompt not in text and buffer_prompt not in text:
                 return text
             cleaned = text
             for p in (compliance_prompt, buffer_prompt):
                 if p and p in cleaned:
+                    cleaned = cleaned.replace(f"{p}\n\n---\n\n", "")
+                    cleaned = cleaned.replace(f"\n\n---\n\n{p}", "")
                     cleaned = cleaned.replace(p, "").strip()
+            cleaned = re.sub(r"\n*【用户系统设定与规范】：\s*(?:---\s*)*$", "", cleaned)
             cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
             return cleaned
 
@@ -1313,30 +1479,76 @@ async def factory_compat_post_request_interceptor(
                 for part in sys_inst["parts"]:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
                         part["text"] = _strip_buried_compliance(part["text"])
-            _inject_compliance_prompt_gemini(payload, compliance_prompt, buffer_prompt, lowercase_system)
+            # 后置阶段不再传 lowercase=True，防止把 linux_toolcall 注入的大写内核标签转成小写
+            _inject_compliance_prompt_gemini(payload, compliance_prompt, buffer_prompt, False)
         elif engine_lower in CLAUDE_ENGINES:
-            _inject_compliance_prompt_claude(payload, compliance_prompt, buffer_prompt, lowercase_system)
+            _inject_compliance_prompt_claude(payload, compliance_prompt, buffer_prompt, False)
         elif engine_lower in OAI_ENGINES:
             msgs = payload.get("messages")
             if isinstance(msgs, list):
-                for m in msgs:
+                new_msgs = []
+                for idx, m in enumerate(msgs):
                     if isinstance(m, dict) and m.get("role") in ("system", "developer") and isinstance(m.get("content"), str):
-                        m["content"] = _strip_buried_compliance(m["content"])
+                        # 若首两条已经是 [compliance_prompt, buffer_prompt]，直接原样保留
+                        if idx == 1 and m["content"] == buffer_prompt:
+                            new_msgs.append(m)
+                            continue
+                        cleaned_c = _strip_buried_compliance(m["content"])
+                        if cleaned_c or m["content"] == "":
+                            m["content"] = cleaned_c
+                            new_msgs.append(m)
+                    else:
+                        new_msgs.append(m)
+                payload["messages"] = new_msgs
             _inject_compliance_prompt_openai(payload, compliance_prompt, buffer_prompt)
         elif engine_lower in RESPONSES_ENGINES:
             if isinstance(payload.get("instructions"), str):
                 payload["instructions"] = _strip_buried_compliance(payload["instructions"])
             _inject_compliance_prompt_responses(payload, compliance_prompt, buffer_prompt)
 
+    # 后置收口 claude_tools (priority=45) / oai_tools (priority=50) 运行后的模型名与参数状态
+    if engine_lower in CLAUDE_ENGINES:
+        cur_m = str(payload.get("model", "") or "")
+        if cur_m:
+            base_m, had_fast = _split_fast_suffix(cur_m)
+            norm_m = _normalize_model(base_m)
+            if norm_m:
+                payload["model"] = f"{norm_m}-fast" if had_fast else norm_m
+        if strip_sampling_params:
+            for name in ("temperature", "top_p", "top_k"):
+                payload.pop(name, None)
+        _calibrate_claude_thinking_tokens(payload)
+        _apply_claude_beta_and_fast(
+            headers,
+            payload,
+            cfg,
+            api_provider=str(active_provider) if active_provider else None,
+            context_1m_requested=False,
+        )
+    elif engine_lower in (OAI_ENGINES | RESPONSES_ENGINES):
+        cur_m = str(payload.get("model", "") or "")
+        if cur_m:
+            base_m, had_fast = _split_fast_suffix(cur_m)
+            norm_m = _normalize_model(base_m)
+            if norm_m:
+                payload["model"] = f"{norm_m}-fast" if had_fast else norm_m
+        _apply_service_tier_injection(
+            payload,
+            cfg,
+            engine_lower,
+            api_provider=str(active_provider) if active_provider else None,
+        )
+
     if engine_lower in GEMINI_ENGINES:
         _normalize_gemini_tools_for_factory(payload)
         # 对齐 droid.exe v0.244.0 的 ft = {model, contents, systemInstruction, tools, generationConfig}：
-        # 清理 gemini_channel / linux_toolcall 附加的 safetySettings 与 tool_config，并严格按官方字段顺序排列
+        # 清理 gemini_channel / linux_toolcall 附加的 safetySettings、tool_config 与 stream，并严格按官方字段顺序排列
         if _cfg_bool(cfg, "strip_gemini_extra_fields", True):
             payload.pop("safetySettings", None)
             payload.pop("safety_settings", None)
             payload.pop("tool_config", None)
             payload.pop("toolConfig", None)
+            payload.pop("stream", None)
 
         model_val = payload.get("model") or _resolve_gemini_model(request, provider, url, payload)
         clean_model = ""
