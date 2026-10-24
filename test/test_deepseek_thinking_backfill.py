@@ -260,3 +260,52 @@ def test_malformed_payload_passthrough():
     # messages 为 None / 非 dict payload 均不抛异常
     _, _, out2 = run("openai", PROVIDER_DS_OPENAI, {"model": "deepseek-v4-flash", "messages": None})
     assert out2["messages"] is None
+
+
+# ==================== 上游 a527181 / c3feab7 增强 ====================
+
+def _assistant_history():
+    return [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]
+
+
+def test_flash_model_counts_as_thinking_on_claude():
+    payload = {"model": "ds/deepseek-flash", "messages": _assistant_history()}
+    run("claude", PROVIDER_DS_CLAUDE, payload)
+    assert payload["messages"][1]["content"][0]["type"] == "thinking"
+
+
+def test_reasoning_effort_enables_thinking_and_downgrades_tool_choice():
+    payload = {
+        "model": "deepseek-chat", "reasoning_effort": "high",
+        "tool_choice": "required", "messages": _assistant_history(),
+    }
+    run("openai", PROVIDER_DS_OPENAI, payload)
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["tool_choice"] == "auto"
+    assert payload["messages"][1]["reasoning_content"] == ""
+
+
+def test_reasoning_effort_none_disables_thinking():
+    payload = {"model": "deepseek-v4-flash", "reasoning_effort": "none",
+               "tool_choice": "required", "messages": _assistant_history()}
+    run("openai", PROVIDER_DS_OPENAI, payload)
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+    assert payload["tool_choice"] == "required"
+    assert "reasoning_content" not in payload["messages"][1]
+
+
+def test_max_completion_tokens_mapped_to_max_tokens():
+    payload = {"model": "deepseek-v4-pro", "max_completion_tokens": 4096, "messages": []}
+    run("openai", PROVIDER_DS_OPENAI, payload)
+    assert payload["max_tokens"] == 4096 and "max_completion_tokens" not in payload
+    payload = {"model": "deepseek-v4-pro", "max_tokens": 100, "max_completion_tokens": 4096, "messages": []}
+    run("openai", PROVIDER_DS_OPENAI, payload)
+    assert payload["max_tokens"] == 100 and "max_completion_tokens" not in payload
+
+
+def test_explicit_disabled_strips_reasoning_effort():
+    payload = {"model": "deepseek-v4-pro", "thinking": {"type": "disabled"},
+               "reasoning_effort": "high", "tool_choice": "required", "messages": _assistant_history()}
+    run("openai", PROVIDER_DS_OPENAI, payload)
+    assert "reasoning_effort" not in payload and payload["tool_choice"] == "required"

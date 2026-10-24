@@ -394,7 +394,9 @@ async def cleanup_expired_raw_data():
                                 db_path = "data/stats.db"
                             async with aiosqlite.connect(db_path) as vacuum_conn:
                                 # 每次回收最多 2000 页（约 8MB），轻量不阻塞
-                                await vacuum_conn.execute("PRAGMA incremental_vacuum(2000)")
+                                # [fix 2026-10-25] execute() 只单步执行一次，每轮仅回收 1 页（线上 freelist 积压 5 万页）；
+                                # executescript 会把 PRAGMA 跑完，真正回收 N 页。
+                                await vacuum_conn.executescript("PRAGMA incremental_vacuum(2000);")
                                 logger.info("SQLite incremental_vacuum completed after raw data cleanup")
                         except Exception as ve:
                             logger.warning(f"SQLite incremental_vacuum failed (non-critical): {ve}")
