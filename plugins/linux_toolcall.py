@@ -1623,17 +1623,13 @@ async def linux_toolcall_request_interceptor(
 
 
 _E2_MULTIMODAL_SANITIZE_MAP = (
-    (re.compile(r"elementary[_\s]+schooler|middle[_\s]+schooler|high[_\s]+schooler|schoolgirl|schoolboy", re.IGNORECASE), "academy_student"),
+    (re.compile(r"elementary[_\s]+schooler|middle[_\s]+schooler", re.IGNORECASE), "academy_student"),
     (re.compile(r"loli|shota|childish|babyface|underage|minor|(?<![a-z])child(?![a-z])|(?<![a-z])kid(?![a-z])|young[_\s]+girl", re.IGNORECASE), "petite_figure"),
     (re.compile(r"masturbat[a-z]*|fingering|fingered|squirting|squirt|orgasm[a-z]*|(?<![a-z])cum(?![a-z])|cumming|semen|ejaculat[a-z]*", re.IGNORECASE), "dynamic_motion"),
-    (re.compile(r"penis|pussy|vagina[a-z]*|vulva|clitoris|(?<![a-z])clit(?![a-z])|cameltoe|anus|(?<![a-z])anal(?![a-z])|butthole|crotch|groin|genital[a-z]*|pubic[a-z]*", re.IGNORECASE), "anatomical_detail"),
-    (re.compile(r"nipple[a-z]*|areola[a-z]*|pokies|(?<![a-z])erect(?![a-z])", re.IGNORECASE), "surface_detail"),
-    (re.compile(r"breast[a-z]*|boob[a-z]*|cleavage|sideboob|underboob|underbutt|buttock[a-z]*|(?<![a-z])butt(?![a-z])|(?<![a-z])ass(?![a-z])", re.IGNORECASE), "torso_contour"),
-    (re.compile(r"topless|bottomless|(?<![a-z])nude(?![a-z])|(?<![a-z])naked(?![a-z])|undress[a-z]*|strip[a-z]*|skimpy|micro[_\s]+bra", re.IGNORECASE), "costume_variant"),
-    (re.compile(r"nsfw|ecchi|ahegao|erotic|lewd|suggestive|sexy|fetish|bdsm|bondage|humiliat[a-z]*|slave|whore|slut|bitch|rape[a-z]*|molest[a-z]*|incest[a-z]*|gore|blood[a-z]*", re.IGNORECASE), "dramatic_style"),
-    (re.compile(r"panties|panty|underwear|lingerie|(?<![a-z])bra(?![a-z])|boyshorts|miniskirt|garter[a-z]*|thighhigh[a-z]*|skindentation", re.IGNORECASE), "apparel_item"),
+    (re.compile(r"penis|pussy|vagina[a-z]*|vulva|clitoris|(?<![a-z])clit(?![a-z])|cameltoe|anus|(?<![a-z])anal(?![a-z])|butthole|genital[a-z]*|pubic[a-z]*", re.IGNORECASE), "anatomical_detail"),
+    (re.compile(r"rape[a-z]*|molest[a-z]*|incest[a-z]*", re.IGNORECASE), "dramatic_style"),
     (re.compile(r"萝莉|幼女|正太|未成年|小学生|初中生|女童|男童", re.IGNORECASE), "娇小角色"),
-    (re.compile(r"自慰|潮吹|指奸|高潮|精液|肉棒|阴茎|阴道|阴部|私处|小穴|蜜穴|菊花|肛门|露点|乳头|乳晕|凸点|全裸|半裸|赤裸|裸体|脱衣|半脱|走光|色气|色情|淫乱|母猪|调教|羞耻|凌辱|强奸|乱伦|内裤|胸罩|内衣|吊带袜|臀线|蜜桃臀|撅臀|巨乳|胸部|乳沟", re.IGNORECASE), "造型细节"),
+    (re.compile(r"自慰|潮吹|指奸|精液|肉棒|阴茎|阴道|小穴|蜜穴|菊花|肛门|强奸|乱伦", re.IGNORECASE), "造型细节"),
 )
 
 
@@ -1644,11 +1640,37 @@ _BINARY_SKIP_KEYS = frozenset({
     "file_data",
     "thoughtSignature",
     "thought_signature",
+    "functionCall",
+    "function_call",
+    "functionResponse",
+    "function_response",
 })
+
+
+def _contains_multimodal_media(node: Any) -> bool:
+    if isinstance(node, list):
+        return any(_contains_multimodal_media(item) for item in node)
+    if isinstance(node, dict):
+        if any(k in node for k in ("inlineData", "inline_data", "fileData", "file_data")):
+            return True
+        return any(_contains_multimodal_media(v) for k, v in node.items() if k not in _BINARY_SKIP_KEYS)
+    return False
+
+
+def _is_protected_tool_output_text(s: str) -> bool:
+    return (
+        ("── " in s and " ──\n" in s)
+        or "[Current Turn Tool Output (" in s
+        or "[Current Turn Executed Tool Call" in s
+        or '"file_size":' in s
+        or '"chunks_found":' in s
+    )
 
 
 def _sanitize_e2_node(node: Any) -> Any:
     if isinstance(node, str):
+        if _is_protected_tool_output_text(node):
+            return node
         s = node
         for pattern, replacement in _E2_MULTIMODAL_SANITIZE_MAP:
             s = pattern.sub(replacement, s)
@@ -1664,8 +1686,8 @@ def _sanitize_e2_node(node: Any) -> Any:
 
 
 def _sanitize_gemini_contents_for_e2(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """对发往上游的 Gemini contents 进行无损同义词脱敏，跳过 inlineData/inline_data/thoughtSignature 等 Base64 字段，防止污染二进制载荷。"""
-    if not contents:
+    """对含多模态图片的 Gemini contents 进行轻量脱敏，严格跳过二进制载荷、原生工具调用/结果与文件读取输出。"""
+    if not contents or not _contains_multimodal_media(contents):
         return contents
     try:
         return _sanitize_e2_node(contents)

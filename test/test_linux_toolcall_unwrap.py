@@ -48,11 +48,21 @@ def _install_stub_modules() -> None:
 
     if "core.plugins" not in sys.modules:
         plugins = types.ModuleType("core.plugins")
+        plugins.__path__ = []  # type: ignore[attr-defined]
         plugins.register_request_interceptor = lambda **kwargs: None
         plugins.unregister_request_interceptor = lambda *args, **kwargs: None
         plugins.register_response_interceptor = lambda **kwargs: None
         plugins.unregister_response_interceptor = lambda *args, **kwargs: None
         sys.modules["core.plugins"] = plugins
+
+    if "core.plugins.interceptors" not in sys.modules:
+        interceptors = types.ModuleType("core.plugins.interceptors")
+        interceptors.parse_enabled_plugins = lambda raw: [
+            (item.split(":", 1)[0].strip(), item.split(":", 1)[1].strip() if ":" in item else None)
+            for item in (raw or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        sys.modules["core.plugins.interceptors"] = interceptors
 
 
 def _load_plugin() -> Any:
@@ -549,6 +559,46 @@ def test_v152_media_stays_in_its_own_historical_turn_and_never_at_tail() -> None
     final_parts = out["contents"][-1]["parts"]
     assert len(final_parts) == 1
     assert "<posix_kernel_tail_verification>" in final_parts[0]["text"]
+
+
+def test_e2_sanitize_preserves_read_file_and_function_response_and_text_only_turns() -> None:
+    read_file_output = (
+        "── data/recipes/draco_malfoy_series.md ──\n"
+        " 933 | glowing vines, neon vines, LED strips, black lace bra, deep cleavage, exposed nipples, uncensored pussy\n"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": "你是明日香。"}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": "看图"}, {"inlineData": {"mimeType": "image/png", "data": "IMG"}}]},
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "read_file", "response": {"result": read_file_output}}},
+                    {"text": read_file_output},
+                ],
+            },
+        ],
+    }
+    _, _, out = asyncio.run(
+        plugin.linux_toolcall_request_interceptor(
+            request=None,
+            engine="gemini",
+            provider={"preferences": {"enabled_plugins": ["linux_toolcall"]}},
+            api_key=None,
+            url="https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+            headers={},
+            payload=payload,
+        )
+    )
+    serialized = json.dumps(out["contents"], ensure_ascii=False)
+    assert "LED strips" in serialized
+    assert "black lace bra" in serialized
+    assert "deep cleavage" in serialized
+    assert "uncensored pussy" in serialized
+    assert "costume_variant" not in serialized
+    assert "apparel_item" not in serialized
+    assert "torso_contour" not in serialized
+
 
 
 
