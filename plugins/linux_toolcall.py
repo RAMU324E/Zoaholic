@@ -1492,7 +1492,7 @@ async def linux_toolcall_request_interceptor(
                         if not has_prefix_dilution:
                             prefix_dilution_block = (
                                 "<system_telemetry_archive>\n"
-                                + "\n".join([STEALTH_DILUTION_TEXT] * 12)
+                                + "\n".join([STEALTH_DILUTION_TEXT] * 24)
                                 + "\n</system_telemetry_archive>"
                             )
                             first_parts.insert(0, {"text": prefix_dilution_block})
