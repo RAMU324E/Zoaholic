@@ -989,6 +989,19 @@ def _collect_history(payload: dict, protocol: str, cache_priority: bool):
         if not history_messages and normalized_role == "assistant":
             history_messages.append(_history_message(protocol, "user", "请根据上下文继续。"))
         elif previous_plain_role == normalized_role:
+            if normalized_role == "user" and history_messages:
+                prev_txt = _system_text(history_messages[-1], protocol).strip()
+                # If the user interrupted/edited a message and resent an extended version,
+                # replace the truncated fragment; otherwise merge consecutive user messages
+                # instead of injecting a robotic "好的，已收到。" model turn that breaks persona.
+                prev_body = prev_txt.split("): ", 1)[-1].strip() if "): " in prev_txt else prev_txt
+                curr_body = formatted.split("): ", 1)[-1].strip() if "): " in formatted else formatted
+                if prev_body and curr_body.startswith(prev_body):
+                    merged_user = formatted
+                else:
+                    merged_user = f"{prev_txt}\n\n{formatted}" if prev_txt else formatted
+                history_messages[-1] = _history_message(protocol, "user", merged_user)
+                continue
             ack_role = "assistant" if normalized_role == "user" else "user"
             ack_text = "好的，已收到。" if ack_role == "assistant" else "请继续。"
             history_messages.append(_history_message(protocol, ack_role, ack_text))
