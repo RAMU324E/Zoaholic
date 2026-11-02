@@ -15,7 +15,7 @@ from time import time
 
 from fastapi import HTTPException
 
-from .log_config import logger
+from .log_config import logger, key_fingerprint, redact_log_text
 
 
 def parse_rate_limit(limit_string):
@@ -230,7 +230,7 @@ class ThreadSafeCircularList:
             # 修改原因：requests 的值已经是按 model 分组的 deque，不能再按旧 list 结构直接替换。
             # 修改方式：冷却时只设置 cooling_until，不主动改写 requests 结构，交给窗口清理和过期清理处理。
             # 目的：避免把 requests[item] 误改成 list，保持嵌套 deque 结构一致。
-            logger.warning(f"API key {item} 已进入冷却状态，冷却时间 {cooling_time} 秒")
+            logger.warning(f"API key {key_fingerprint(item)} 已进入冷却状态，冷却时间 {cooling_time} 秒")
 
     async def set_auto_disabled(self, item: str, duration: int = 0, reason: str = ""):
         """自动禁用某个 Key。
@@ -258,8 +258,8 @@ class ThreadSafeCircularList:
                 "reason": reason,
             }
         logger.warning(
-            f"[auto_disable] Key {item} disabled for provider {self.provider_name}, "
-            f"duration={'permanent' if duration == 0 else f'{duration}s'}, reason: {reason}"
+            f"[auto_disable] Key {key_fingerprint(item)} disabled for provider {self.provider_name}, "
+            f"duration={'permanent' if duration == 0 else f'{duration}s'}, reason: {redact_log_text(reason, (item,))}"
         )
         _save_all_auto_disabled()
 
@@ -381,7 +381,7 @@ class ThreadSafeCircularList:
                 recent_requests = sum(1 for req in self.requests[item][model_key] if req > now - limit_period)
             if recent_requests >= limit_count:
                 if not is_check:
-                    logger.warning(f"API key {item}: model: {model_key} has been rate limited ({limit_count}/{limit_period} seconds)")
+                    logger.warning(f"API key {key_fingerprint(item)}: model: {model_key} has been rate limited ({limit_count}/{limit_period} seconds)")
                 return True
 
         # 清理太旧的请求记录

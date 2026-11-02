@@ -34,7 +34,7 @@ from fastapi import HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
-from core.log_config import logger
+from core.log_config import logger, key_fingerprint
 from core.streaming import LoggingStreamingResponse
 from core.request import get_payload
 from core.response import fetch_response, fetch_response_stream, check_response
@@ -1094,6 +1094,7 @@ class ModelRequestHandler:
                         type(e).__name__,
                         error_message[:300],
                         exc_info=True,
+                        extra={"sensitive_keys": (byok_real_key, self.request_info_getter().get("_used_api_key"))},
                     )
 
                 # ── CDN/WAF 误判修正 ──
@@ -1193,7 +1194,7 @@ class ModelRequestHandler:
                         # 修改方式：多 key 仍按旧规则冷却；当渠道级降级条件成立时，最后一个 key 也执行冷却。
                         # 目的：既保留单渠道单 key 的旧行为，又让多渠道虚拟路由能在所有 key 不可用后再进入 fallback。
                         if (
-                            (api_key_count_before_rule > 1 or should_consider_channel_cooldown)
+                            (api_key_count_before_rule > 1 or should_consider_channel_cooldown or _rule_result.get("quota_reset"))
                             and all(error not in error_message for error in exclude_error_rate_limit)
                         ):
                             await channel_circular_list.set_auto_disabled(
@@ -1280,13 +1281,14 @@ class ModelRequestHandler:
                 if "<head><title>413 Request Entity Too Large</title></head>" in error_message:
                     status_code = 429
 
-                # 修改原因：BYOK 失败日志不能输出用户真实上游 key。
-                # 修改方式：BYOK 请求只打印模板身份或空值，普通请求保留原有 current_api 便于排障。
-                # 目的：上游 401/403 等错误返回给用户即可，不在服务端日志泄露 BYOK key。
-                log_api_key = byok_template_key if (byok_real_key and is_byok_provider(provider)) else current_api
-                logger.error(f"Error {status_code} with provider {channel_id} API key: {log_api_key}: {error_message}")
+                # 仅用不可逆指纹定位 Key；显式传入本次凭据，连 BYOK 错误正文/堆栈一起脱敏。
+                log_secrets = {"sensitive_keys": (current_api, byok_real_key)}
+                logger.error(
+                    f"Error {status_code} with provider {channel_id} API key: {key_fingerprint(current_api)}: {error_message}",
+                    extra=log_secrets,
+                )
                 import traceback
-                logger.error(f"[traceback] {traceback.format_exc()}")
+                logger.error(f"[traceback] {traceback.format_exc()}", extra=log_secrets)
 
                 # 更新重试路径中的状态码
                 if retry_path:

@@ -11,7 +11,8 @@ Key Rules 统一错误处理引擎
       - match: { status: [401, 403] }  # 匹配多个状态码
         duration: -1                   # 永久禁用
       - match: { keyword: "quota" }    # 匹配错误信息关键词
-        duration: 3600
+        duration: 172800               # 无有效重置时间时兜底冷却 2 天
+        quota_reset: true              # 重置时间 +60秒；无时区按UTC+8
       - match: { status: 529 }         # 错误码映射
         remap: 429
         duration: 30
@@ -33,9 +34,38 @@ retry 含义：
 
 from __future__ import annotations
 
+import math
+import re
+from datetime import datetime, timedelta, timezone
+from time import time
 from typing import Any, Dict, List, Optional
 
 from core.log_config import logger
+
+
+_RESET_TIME_PATTERN = re.compile(
+    r"(?:限额将在|重置时间(?:为|是)?\s*[:：]?|reset(?:s|_at)?\s*(?:at|on|[:=])?)"
+    r"\s*[\"']?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?)(?![\d:T.+-]|[ \t]\d{2}:)",
+    re.IGNORECASE,
+)
+
+
+def _quota_reset_duration(error_message: str, fallback: int) -> int:
+    match = _RESET_TIME_PATTERN.search(error_message or "")
+    if not match:
+        return fallback
+    try:
+        reset_at = datetime.fromisoformat(match.group(1).upper())
+        if reset_at.tzinfo is None:
+            reset_at = reset_at.replace(tzinfo=timezone(timedelta(hours=8)))
+        reset_timestamp = reset_at.timestamp()
+        now = time()
+        if reset_timestamp > now:
+            return math.ceil(reset_timestamp + 60 - now)
+    except (ValueError, OverflowError):
+        pass
+    return fallback
 
 
 def _normalize_status(val: Any) -> List[int]:
@@ -94,6 +124,10 @@ def _normalize_rules(rules: List[dict]) -> List[dict]:
             except (TypeError, ValueError):
                 entry["duration"] = 0
         
+        # 仅正冷却规则显式启用，不能把永久隔离或普通规则改成按日期恢复。
+        if rule.get("quota_reset") is True and entry.get("duration", 0) > 0:
+            entry["quota_reset"] = True
+
         if "remap" in rule:
             try:
                 remap = int(rule["remap"])
@@ -263,6 +297,9 @@ def match_key_rules(
             result: Dict[str, Any] = {"reason": reason}
             if "duration" in rule:
                 result["duration"] = rule["duration"]
+            if rule.get("quota_reset") is True and result.get("duration", 0) > 0:
+                result["duration"] = _quota_reset_duration(error_message, result["duration"])
+                result["quota_reset"] = True
             if "remap" in rule:
                 result["remap"] = rule["remap"]
             # 修改原因：handler 只能根据匹配结果判断本次错误是否需要覆盖重试策略。

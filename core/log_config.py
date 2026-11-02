@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import logging.handlers
 import os
@@ -8,6 +9,7 @@ from collections import deque
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, quote_plus
 
 DEFAULT_BACKEND_LOG_PAGE_SIZE = max(1, int(os.getenv("BACKEND_LOG_PAGE_SIZE", "200")))
 DEFAULT_BACKEND_LOG_BUFFER_SIZE = max(50, int(os.getenv("BACKEND_LOG_BUFFER_SIZE", "200")))
@@ -33,6 +35,33 @@ _LOGGER_LINE_PATTERN = re.compile(
 _PREFIX_LEVEL_PATTERN = re.compile(
     r"^(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL):\s+(?P<message>.*)$"
 )
+
+
+def key_fingerprint(key: Any) -> str:
+    """用于排障的不可逆短指纹，不保留 Key 前后缀。"""
+    if not key or key == "*":
+        return "-"
+    return "<key:" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:12] + ">"
+
+
+def redact_log_text(value: Any, sensitive_keys=()) -> str:
+    """输出与后台缓冲共用；复用已加载的 Key 池，避免循环导入或复制凭据配置。"""
+    text = str(value or "")
+    keys = {key for key in sensitive_keys if isinstance(key, str) and key and key != "*"}
+    pools = getattr(sys.modules.get("core.key_pool"), "provider_api_circular_list", {})
+    for pool in tuple(pools.values()):
+        keys.update(key for key in tuple(getattr(pool, "items", ())) if isinstance(key, str) and key and key != "*")
+    # ponytail: 按现有池逐行替换；仅在日志吞吐实测成为瓶颈时再缓存匹配器。
+    for key in sorted(keys, key=len, reverse=True):
+        fingerprint = key_fingerprint(key)
+        for variant in {key, quote(key, safe=""), quote_plus(key, safe="")}:
+            text = text.replace(variant, fingerprint)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_log_text(super().format(record), getattr(record, "sensitive_keys", ()))
 
 
 def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -95,9 +124,10 @@ class TeeStream:
         else:
             text = str(data)
 
-        written = self.original_stream.write(text)
-        self._capture(text)
-        return written if written is not None else len(text)
+        safe_text = redact_log_text(text)
+        self.original_stream.write(safe_text)
+        self._capture(safe_text)
+        return len(text)
 
     def flush(self):
         self._flush_pending()
@@ -166,7 +196,7 @@ def _render_log_message_for_buffer(record: logging.LogRecord, formatter: Optiona
         if stack_text:
             message = f"{message}\n{stack_text}"
 
-    return message
+    return redact_log_text(message, getattr(record, "sensitive_keys", ()))
 
 
 def _append_backend_log_line(
@@ -178,7 +208,7 @@ def _append_backend_log_line(
     source: str = "stream",
     captured_at: Optional[datetime] = None,
 ):
-    raw_text = str(message or "")
+    raw_text = redact_log_text(message)
     if not raw_text.strip():
         return
 
@@ -228,11 +258,11 @@ def _configure_root_logging():
 
     stdout_handler = BackendCaptureStreamHandler(_ORIGINAL_STDOUT, "stdout")
     stdout_handler.addFilter(MaxLevelFilter(logging.INFO))
-    stdout_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    stdout_handler.setFormatter(RedactingFormatter(LOG_FORMAT))
 
     stderr_handler = BackendCaptureStreamHandler(_ORIGINAL_STDERR, "stderr")
     stderr_handler.setLevel(logging.WARNING)
-    stderr_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    stderr_handler.setFormatter(RedactingFormatter(LOG_FORMAT))
 
     # Use QueueHandler + QueueListener so that logger.xxx() calls never
     # block the event loop on stream.write() — the actual I/O happens in

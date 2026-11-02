@@ -443,3 +443,45 @@ async def test_matching_cold_virtual_chain_uses_authorized_regular_pool(monkeypa
     rules.reset_mock()
     assert await routing.get_matching_providers(MODEL, config, 0, app, skip_virtual=True) == []
     rules.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quota_reset", [True, False])
+async def test_single_key_quota_cooldown_is_opt_in_and_persists(make_case, monkeypatch, tmp_path, quota_reset):
+    import core.key_pool as key_pool
+    import core.key_rules as key_rules
+
+    now = 1793592000  # 2026-11-02T04:00:00Z
+    monkeypatch.setattr(key_rules, "time", lambda: now)
+    monkeypatch.setattr(key_pool, "time", lambda: now)
+    monkeypatch.setattr(key_pool, "_RT_DISABLED_FILE", str(tmp_path / "disabled.json"))
+    chosen = provider("quota", None)
+    chosen["preferences"]["key_rules"] = [{
+        "match": {"keyword": ["每周使用上限"]}, "duration": 604800,
+        "quota_reset": quota_reset, "retry": False,
+    }]
+    pool = key_pool.ThreadSafeCircularList(["actual-request-key"], provider_name="quota")
+    pools = {"quota": pool}
+    monkeypatch.setattr(key_pool, "provider_api_circular_list", pools)
+
+    async def fail(data, selected):
+        case.info["_used_api_key"] = "actual-request-key"
+        raise HTTPException(429, "每周使用上限；限额将在 2026-11-02 12:54:47 重置")
+
+    case = make_case([chosen], pools, auto_retry=False, process=fail)
+    response = await case.handler.request_model(request(), 0, None)
+    assert response.status_code == 429
+    assert case.attempts == ["quota"]
+    if not quota_reset:
+        assert pool.cooling_until.get("actual-request-key", 0) == 0
+        return
+    assert pool.cooling_until["actual-request-key"] == now + 3347
+    assert pool.get_enabled_items_count() == 0
+    snapshot = key_pool.load_auto_disabled_snapshot()
+    assert snapshot["quota"]["actual-request-key"]["cooling_until"] == now + 3347
+    pool.cooling_until.clear()
+    pool.auto_disabled_info.clear()
+    key_pool.restore_auto_disabled()
+    assert pool.get_enabled_items_count() == 0
+    monkeypatch.setattr(key_pool, "time", lambda: now + 3348)
+    assert pool.get_enabled_items_count() == 1
