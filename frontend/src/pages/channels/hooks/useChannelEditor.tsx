@@ -16,6 +16,7 @@ import { createApiKeyClientId } from '../../../lib/apiKeyClientId';
 import type { EnabledPluginValue } from '../../../lib/pluginEntries';
 import { toastError, toastSuccess, toastWarning, fmtErr } from '../../../components/Toast';
 import { useChannelOAuth } from './useChannelOAuth';
+import { splitPastedKeys } from '../lib/keyPaste';
 import type { UseChannelsCoreResult } from './useChannelsCore';
 import type {
   ApiKeyObj,
@@ -560,8 +561,9 @@ export function useChannelEditor(core: UseChannelsCoreResult): UseChannelEditorR
 
   const handleKeyPaste = (e: ClipboardEvent<HTMLInputElement>, idx: number) => {
     const pastedText = e.clipboardData.getData('text');
-    const lines = pastedText.split(/\r?\n|\r/).map(s => s.trim()).filter(Boolean);
-    if (lines.length <= 1 || !formData) return;
+    const lines = splitPastedKeys(pastedText);
+    // A single plain key pastes natively; JSON is rewritten to its compact form.
+    if (!formData || lines.length === 0 || (lines.length === 1 && lines[0] === pastedText.trim())) return;
     e.preventDefault();
     const newKeys = [...formData.api_keys];
     newKeys[idx] = { ...newKeys[idx], key: lines[0] };
