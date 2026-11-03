@@ -69,18 +69,15 @@ def websocket_enabled(provider: Optional[dict]) -> bool:
 
 
 def resolve_transport_proxy(provider: Optional[dict]) -> Optional[str]:
-    """与 process_request 相同的代理优先级：provider.preferences.proxy → 全局 preferences.proxy。"""
-    try:
-        proxy = (provider or {}).get("preferences", {}).get("proxy")
-        if proxy:
-            return proxy
-    except Exception:
-        pass
+    """与 process_request 相同的代理优先级：warp_only → provider.preferences.proxy → 全局 preferences.proxy。"""
+    from core.utils import resolve_provider_proxy
+    config = None
     try:
         from main import app
-        return (app.state.config.get("preferences") or {}).get("proxy")
+        config = getattr(app.state, "config", None)
     except Exception:
-        return None
+        config = None
+    return resolve_provider_proxy(provider, config)
 
 
 def http_url_to_ws(url: str) -> str:

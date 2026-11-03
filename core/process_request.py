@@ -27,7 +27,13 @@ from core.response import fetch_response, fetch_response_stream
 from core.streaming import LoggingStreamingResponse
 from core.stream_errors import reset_stream_state, UpstreamStreamError, extract_stream_error
 from core.byok import get_byok_real_key, is_byok_provider
-from core.utils import get_engine, is_local_api_key, provider_api_circular_list
+from core.utils import (
+    get_engine,
+    is_local_api_key,
+    is_warp_only_provider,
+    provider_api_circular_list,
+    resolve_provider_proxy,
+)
 from utils import apply_custom_headers, error_handling_wrapper, safe_get
 
 if TYPE_CHECKING:
@@ -128,7 +134,11 @@ async def process_request(
     # 修改方式：在请求早期写入 _oauth_channel_id，并把同一 channel_id 传给 OAuthManager.resolve。
     # 目的：让 access_token 解析和 quota 回写都只作用于当前渠道。
     current_info_early["_oauth_channel_id"] = channel_id
-    api_key = await _resolve_oauth_api_key(app, api_key, channel_id=channel_id)
+    from core.http import proxy_context
+    proxy = resolve_provider_proxy(provider, getattr(app.state, "config", None))
+    require_proxy = is_warp_only_provider(provider)
+    with proxy_context(proxy, require_proxy=require_proxy):
+        api_key = await _resolve_oauth_api_key(app, api_key, channel_id=channel_id)
 
     engine, stream_override, stream_mode = get_engine(provider, endpoint, original_model)
 
@@ -145,13 +155,8 @@ async def process_request(
         logger.info(f"provider: {channel_id[:11]:<11} model: {request.model:<22} engine: {engine[:13]:<13} role: {role}")
 
     last_message_role = safe_get(request, "messages", -1, "role", default=None)
-    
-    # 提前计算代理，以便 get_payload 内部创建的裸 httpx.AsyncClient 也能走代理
-    proxy = safe_get(app.state.config, "preferences", "proxy", default=None)  # global proxy
-    proxy = safe_get(provider, "preferences", "proxy", default=proxy)  # provider proxy
 
-    from core.http import proxy_context
-    with proxy_context(proxy):
+    with proxy_context(proxy, require_proxy=require_proxy):
         url, headers, payload = await get_payload(request, engine, provider, api_key)
     # custom headers 已在 get_payload → apply_request_interceptors 之前统一应用
     
@@ -200,8 +205,8 @@ async def process_request(
         except (ValueError, TypeError, AttributeError):
             pass
 
-    proxy = safe_get(app.state.config, "preferences", "proxy", default=None)  # global proxy
-    proxy = safe_get(provider, "preferences", "proxy", default=proxy)  # provider proxy
+    proxy = resolve_provider_proxy(provider, getattr(app.state, "config", None))
+    require_proxy = is_warp_only_provider(provider)
     
     # 获取该渠道启用的插件列表
     enabled_plugins = safe_get(provider, "preferences", "enabled_plugins", default=None)
@@ -245,14 +250,15 @@ async def process_request(
                     api_key_info=api_key_info,
                     key_enabled_plugins=key_enabled_plugins,
                 )
-                wrapped_generator, first_response_time = await error_handling_wrapper(
-                    generator, channel_id, engine, True,
-                    app.state.error_triggers, keepalive_interval=keepalive_interval,
-                    last_message_role=last_message_role,
-                    request_url=url,
-                    app=app,
-                    current_info=current_info,
-                )
+                with proxy_context(proxy, require_proxy=require_proxy):
+                    wrapped_generator, first_response_time = await error_handling_wrapper(
+                        generator, channel_id, engine, True,
+                        app.state.error_triggers, keepalive_interval=keepalive_interval,
+                        last_message_role=last_message_role,
+                        request_url=url,
+                        app=app,
+                        current_info=current_info,
+                    )
 
                 if client_wants_stream:
                     # 正常流式：直接转发
@@ -289,14 +295,15 @@ async def process_request(
                     api_key_info=api_key_info,
                     key_enabled_plugins=key_enabled_plugins,
                 )
-                wrapped_generator, first_response_time = await error_handling_wrapper(
-                    generator, channel_id, engine, False,
-                    app.state.error_triggers, keepalive_interval=keepalive_interval,
-                    last_message_role=last_message_role,
-                    request_url=url,
-                    app=app,
-                    current_info=current_info,
-                )
+                with proxy_context(proxy, require_proxy=require_proxy):
+                    wrapped_generator, first_response_time = await error_handling_wrapper(
+                        generator, channel_id, engine, False,
+                        app.state.error_triggers, keepalive_interval=keepalive_interval,
+                        last_message_role=last_message_role,
+                        request_url=url,
+                        app=app,
+                        current_info=current_info,
+                    )
 
                 if not client_wants_stream:
                     # 正常非流式

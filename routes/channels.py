@@ -1116,16 +1116,14 @@ async def query_channel_balance(
         provider["base_url"] = f"https://{base_url}"
 
     # 代理配置
-    proxy = (
-        safe_get(provider_config, "preferences", "proxy")
-        or provider_config.get("proxy")
-        or safe_get(app.state.config, "preferences", "proxy")
-    )
+    from core.utils import is_warp_only_provider, resolve_provider_proxy
+    proxy = resolve_provider_proxy(provider_config, getattr(app.state, "config", None))
+    require_proxy = is_warp_only_provider(provider_config)
 
     try:
         from core.http import proxy_context
 
-        with proxy_context(proxy):
+        with proxy_context(proxy, require_proxy=require_proxy):
             target_url = provider.get("base_url") or "https://localhost"
             async with app.state.client_manager.get_client(target_url, proxy) as client:
                 intercepted_client = None

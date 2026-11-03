@@ -742,7 +742,10 @@ async def import_account(request: Request):
 
         if oauth_provider:
             try:
-                updated = await oauth_provider.refresh_token(token_data)
+                from contextlib import nullcontext
+                ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+                with ctx:
+                    updated = await oauth_provider.refresh_token(token_data)
                 await oauth_mgr.register(channel_id, client_email, type_name, updated)
                 return {"message": "Service account imported", "key_id": client_email}
             except Exception as e:
@@ -755,10 +758,13 @@ async def import_account(request: Request):
     token_data = _token_data_from_body(body)
     try:
         if body.get("refresh_token") and oauth_provider:
-            if hasattr(oauth_mgr, "refresh_provider"):
-                updated = await oauth_mgr.refresh_provider(type_name, token_data)
-            else:
-                updated = await oauth_provider.refresh_token(token_data)
+            from contextlib import nullcontext
+            ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+            with ctx:
+                if hasattr(oauth_mgr, "refresh_provider"):
+                    updated = await oauth_mgr.refresh_provider(type_name, token_data)
+                else:
+                    updated = await oauth_provider.refresh_token(token_data)
             email = updated.get("email")
             final_key_id = email if email else key_id
             already_exists = _key_exists_in_provider(request.app, channel_id, final_key_id)
@@ -824,10 +830,13 @@ async def batch_import(request: Request):
                         # 修改原因：CPA/sub2api 导出中的 access_token 可能已经临近过期，refresh_token 可用时应先刷新再落库。
                         # 修改方式：优先走 OAuthManager.refresh_provider 以继承运行时配置注入；旧 manager 或测试替身缺失该方法时回退到 provider.refresh_token。
                         # 目的：保存更新后的 access_token 和可能轮换后的 refresh_token，减少导入后首次请求失败概率。
-                        if hasattr(oauth_mgr, "refresh_provider"):
-                            token_data = await oauth_mgr.refresh_provider(type_name, token_data)
-                        else:
-                            token_data = await oauth_provider.refresh_token(token_data)
+                        from contextlib import nullcontext
+                        ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+                        with ctx:
+                            if hasattr(oauth_mgr, "refresh_provider"):
+                                token_data = await oauth_mgr.refresh_provider(type_name, token_data)
+                            else:
+                                token_data = await oauth_provider.refresh_token(token_data)
 
                     if not token_data.get("access_token"):
                         skipped += 1

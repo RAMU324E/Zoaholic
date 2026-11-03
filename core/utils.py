@@ -237,7 +237,9 @@ def get_engine(provider, endpoint=None, original_model=""):
 
     return engine, stream, stream_mode
 
-def get_proxy(proxy, client_config = {}):
+def get_proxy(proxy, client_config = None):
+    if client_config is None:
+        client_config = {}
     if proxy:
         # 解析代理URL
         parsed = urlparse(proxy)
@@ -252,13 +254,36 @@ def get_proxy(proxy, client_config = {}):
             client_config["proxy"] = proxy
     return client_config
 
+
+def is_warp_only_provider(provider) -> bool:
+    """检查渠道是否开启了 warp_only 强制代理插件。"""
+    from plugins.warp_only import is_warp_only_enabled
+    return is_warp_only_enabled(provider)
+
+
+def resolve_provider_proxy(provider, config = None):
+    """统一解析渠道代理：warp_only 强制代理 > 渠道 preferences.proxy > 全局 preferences.proxy。"""
+    from plugins.warp_only import resolve_warp_only_proxy
+    warp_proxy = resolve_warp_only_proxy(provider)
+    if warp_proxy:
+        return warp_proxy
+    if isinstance(provider, dict):
+        provider_proxy = safe_get(provider, "preferences", "proxy", default=None) or provider.get("proxy")
+        if isinstance(provider_proxy, str) and provider_proxy.strip():
+            return provider_proxy.strip()
+    if isinstance(config, dict):
+        global_proxy = safe_get(config, "preferences", "proxy", default=None)
+        if isinstance(global_proxy, str) and global_proxy.strip():
+            return global_proxy.strip()
+    return None
+
 async def update_initial_model(provider):
     try:
         engine, stream_mode, _ = get_engine(provider, endpoint=None, original_model="")
         # print("engine", engine, provider)
         api_url = provider['base_url']
         api = provider['api']
-        proxy = safe_get(provider, "preferences", "proxy", default=None)
+        proxy = resolve_provider_proxy(provider)
         client_config = get_proxy(proxy)
         if engine == "gemini":
             before_v1 = api_url.split("/v1beta")[0]

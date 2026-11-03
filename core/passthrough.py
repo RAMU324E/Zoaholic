@@ -23,7 +23,13 @@ from core.response import check_response
 from core.streaming import LoggingStreamingResponse
 from core.stream_utils import close_async_iterator, OwnedAsyncIterator
 from core.stream_errors import reset_stream_state, extract_stream_error, UpstreamStreamError
-from core.utils import get_engine, is_local_api_key, provider_api_circular_list
+from core.utils import (
+    get_engine,
+    is_local_api_key,
+    is_warp_only_provider,
+    provider_api_circular_list,
+    resolve_provider_proxy,
+)
 from utils import apply_custom_headers, has_header_case_insensitive, safe_get, wait_for_timeout, iter_sse_with_keepalive
 
 if TYPE_CHECKING:
@@ -512,7 +518,11 @@ async def process_request_passthrough(
     # 修改方式：在透传请求早期保存 _oauth_channel_id，并按当前 provider name 解析 OAuth key_id。
     # 目的：避免透传请求从其他渠道读取同名账号凭据。
     current_info_early["_oauth_channel_id"] = channel_id
-    api_key = await _resolve_oauth_api_key(app, api_key, channel_id=channel_id)
+    from core.http import proxy_context
+    proxy = resolve_provider_proxy(provider, getattr(app.state, "config", None))
+    require_proxy = is_warp_only_provider(provider)
+    with proxy_context(proxy, require_proxy=require_proxy):
+        api_key = await _resolve_oauth_api_key(app, api_key, channel_id=channel_id)
 
     engine, stream_override, stream_mode = get_engine(provider, endpoint, original_model)
     if stream_override is not None:
@@ -523,12 +533,7 @@ async def process_request_passthrough(
     if not adapter:
         raise ValueError(f"Unknown engine: {engine}")
 
-    # 提前计算代理，以便 adapter 内部创建的裸 httpx.AsyncClient 也能走代理
-    proxy = safe_get(app.state.config, "preferences", "proxy", default=None)
-    proxy = safe_get(provider, "preferences", "proxy", default=proxy)
-
-    from core.http import proxy_context
-    with proxy_context(proxy):
+    with proxy_context(proxy, require_proxy=require_proxy):
         url, adapter_headers, _ = await adapter(request, engine, provider, api_key)
 
     # ── 透传 URL 路径修正 ──
@@ -568,24 +573,25 @@ async def process_request_passthrough(
     )
 
     # 渠道级透传 payload 修饰（把"渠道特殊逻辑"收敛在各自 channel 文件内）
-    if channel and getattr(channel, "passthrough_payload_adapter", None):
-        payload = await channel.passthrough_payload_adapter(
-            payload,
-            passthrough_ctx.modifications,
-            request,
-            engine,
-            provider,
-            api_key,
-        )
+    with proxy_context(proxy, require_proxy=require_proxy):
+        if channel and getattr(channel, "passthrough_payload_adapter", None):
+            payload = await channel.passthrough_payload_adapter(
+                payload,
+                passthrough_ctx.modifications,
+                request,
+                engine,
+                provider,
+                api_key,
+            )
 
-    enabled_plugins = safe_get(provider, "preferences", "enabled_plugins", default=None)
-    # 修改原因：透传路径也需要 Key 级出站拦截器上下文，不能只携带渠道级 enabled_plugins。
-    # 修改方式：接收 handler 传入的 api_key_info 和 key_enabled_plugins，缺失时使用空字典兼容旧调用。
-    # 目的：让透传流式和非流式响应都能执行 key_outbound 阶段。
-    api_key_info = api_key_info or {}
-    url, headers, payload = await apply_request_interceptors(
-        request, engine, provider, api_key, url, headers, payload, enabled_plugins
-    )
+        enabled_plugins = safe_get(provider, "preferences", "enabled_plugins", default=None)
+        # 修改原因：透传路径也需要 Key 级出站拦截器上下文，不能只携带渠道级 enabled_plugins。
+        # 修改方式：接收 handler 传入的 api_key_info 和 key_enabled_plugins，缺失时使用空字典兼容旧调用。
+        # 目的：让透传流式和非流式响应都能执行 key_outbound 阶段。
+        api_key_info = api_key_info or {}
+        url, headers, payload = await apply_request_interceptors(
+            request, engine, provider, api_key, url, headers, payload, enabled_plugins
+        )
 
     # 非生成子端点（如 count_tokens）：剥掉生成专属字段，防止 overrides 塞回的字段触发上游 400
     if url.rstrip('/').endswith('/count_tokens') and isinstance(payload, dict):
@@ -633,8 +639,8 @@ async def process_request_passthrough(
         except (ValueError, TypeError, AttributeError):
             pass
 
-    proxy = safe_get(app.state.config, "preferences", "proxy", default=None)
-    proxy = safe_get(provider, "preferences", "proxy", default=proxy)
+    proxy = resolve_provider_proxy(provider, getattr(app.state, "config", None))
+    require_proxy = is_warp_only_provider(provider)
 
     # 透传路径的 stream_mode 处理（与非透传路径对齐）
     client_wants_stream = bool(request.stream)
@@ -709,11 +715,12 @@ async def process_request_passthrough(
                         key_enabled_plugins=key_enabled_plugins,
                     )
                 # 使用简单的透传错误包装器，不做 JSON 解析
-                wrapped_generator, first_response_time = await _passthrough_error_wrapper(
-                    generator, channel_id, keepalive_interval=keepalive_interval,
-                    current_info=current_info,
-                    engine=engine,
-                )
+                with proxy_context(proxy, require_proxy=require_proxy):
+                    wrapped_generator, first_response_time = await _passthrough_error_wrapper(
+                        generator, channel_id, keepalive_interval=keepalive_interval,
+                        current_info=current_info,
+                        engine=engine,
+                    )
 
                 if client_wants_stream:
                     response = LoggingStreamingResponse(
@@ -779,9 +786,10 @@ async def process_request_passthrough(
                         key_enabled_plugins=key_enabled_plugins,
                     )
                 # 使用简单的透传错误包装器，不做 JSON 解析
-                wrapped_generator, first_response_time = await _passthrough_error_wrapper(
-                    generator, channel_id, stream=False, current_info=current_info
-                )
+                with proxy_context(proxy, require_proxy=require_proxy):
+                    wrapped_generator, first_response_time = await _passthrough_error_wrapper(
+                        generator, channel_id, stream=False, current_info=current_info
+                    )
 
                 if client_wants_stream:
                     # force_non_stream 透传：上游非流式 → 拆成 SSE

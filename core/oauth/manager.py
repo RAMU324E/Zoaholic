@@ -229,6 +229,17 @@ class OAuthManager:
                 return p
         return None
 
+    def channel_proxy_context(self, channel_id: str | None = None):
+        """为指定渠道构建 proxy_context（含 warp_only 强制代理与阻断直连）。"""
+        from core.http import proxy_context
+        from core.utils import is_warp_only_provider, resolve_provider_proxy
+
+        channel_config = self._find_channel_config(channel_id) if channel_id else None
+        config = self.get_config()
+        proxy = resolve_provider_proxy(channel_config, config if isinstance(config, dict) else None)
+        require_proxy = is_warp_only_provider(channel_config)
+        return proxy_context(proxy, require_proxy=require_proxy)
+
     def _get_channel_accounts(self, channel_id: str | None, create: bool = False) -> dict:
         """获取某个渠道下的账号映射。"""
         # 修改原因：注册、解析、刷新、quota、重命名都需要同一套渠道字典访问规则。
@@ -332,7 +343,8 @@ class OAuthManager:
                 f"Disk not writable, skipping refresh for {channel_id}:{key_id} "
                 f"to protect current refresh_token"
             )
-        updated = await self._call_provider_method(provider.refresh_token, cred)
+        with self.channel_proxy_context(channel_id):
+            updated = await self._call_provider_method(provider.refresh_token, cred)
         updated["last_refresh"] = datetime.utcnow().isoformat() + "Z"
         updated["status"] = "active"
         updated["error_count"] = 0
@@ -363,7 +375,7 @@ class OAuthManager:
             )
         return updated
 
-    async def refresh_provider(self, type_name: str, credential: dict) -> dict:
+    async def refresh_provider(self, type_name: str, credential: dict, channel_id: str | None = None) -> dict:
         """调用指定 provider 刷新凭据，并传入当前配置。"""
         # 修改原因：routes.oauth 的手动导入路径也会直接刷新 token，不能绕过实时配置读取机制。
         # 修改方式：统一通过 _call_provider_method 调用 provider.refresh_token。
@@ -371,7 +383,8 @@ class OAuthManager:
         provider = self._providers.get(type_name)
         if not provider:
             raise ValueError(f"Unknown OAuth type: {type_name}")
-        return await self._call_provider_method(provider.refresh_token, credential)
+        with self.channel_proxy_context(channel_id):
+            return await self._call_provider_method(provider.refresh_token, credential)
 
     async def exchange_code(
         self,
@@ -389,12 +402,13 @@ class OAuthManager:
         provider = self._providers.get(type_name)
         if not provider:
             raise ValueError(f"Unknown OAuth type: {type_name}")
-        return await self._call_provider_method(
-            provider.exchange_code,
-            code=code,
-            redirect_uri=redirect_uri,
-            code_verifier=code_verifier,
-        )
+        with self.channel_proxy_context(channel_id):
+            return await self._call_provider_method(
+                provider.exchange_code,
+                code=code,
+                redirect_uri=redirect_uri,
+                code_verifier=code_verifier,
+            )
 
     def _method_accepts_config(self, method) -> bool:
         """判断 provider 方法是否接受 config 参数。"""
@@ -475,7 +489,8 @@ class OAuthManager:
 
         # 找当前渠道的 provider config（含 base_url 等），传给 provider 走反代
         channel_config = self._find_channel_config(channel_id)
-        quota = await self._call_provider_method(provider.fetch_quota, cred, config=channel_config)
+        with self.channel_proxy_context(channel_id):
+            quota = await self._call_provider_method(provider.fetch_quota, cred, config=channel_config)
         if isinstance(quota, dict):
             self.update_quota(channel_id, key_id, quota)
             return quota

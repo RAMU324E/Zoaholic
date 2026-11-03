@@ -344,6 +344,7 @@ class CodexProvider(OAuthProvider):
 
     def _resolve_proxy(self, config: dict | None = None) -> str | None:
         """从当前运行时配置动态获取 codex provider 的 proxy。"""
+        from core.utils import resolve_provider_proxy
         runtime_config = config if config is not None else self._get_runtime_config()
         # provider 级 proxy
         for provider in (runtime_config or {}).get("providers", []):
@@ -351,7 +352,7 @@ class CodexProvider(OAuthProvider):
                 continue
             if provider.get("engine") != "codex":
                 continue
-            proxy = provider.get("preferences", {}).get("proxy")
+            proxy = resolve_provider_proxy(provider, runtime_config)
             if isinstance(proxy, str) and proxy.strip():
                 return proxy.strip()
             break

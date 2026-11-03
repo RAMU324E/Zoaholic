@@ -31,6 +31,7 @@ _outbound_log_next_id = 1
 
 # 上下文代理：在此 ContextVar 有值时，裸创建的 httpx.AsyncClient() 自动注入代理
 _current_proxy: ContextVar[Optional[str]] = ContextVar("_current_proxy", default=None)
+_require_proxy: ContextVar[bool] = ContextVar("_require_proxy", default=False)
 
 # ==================== event_hooks ====================
 
@@ -100,6 +101,8 @@ _installed = False
 async def _patched_async_send(self, request: httpx.Request, **kwargs):
     """包装 send 方法，在传输异常时也写入失败记录。"""
     try:
+        if _require_proxy.get(False) and not getattr(self, "_zoaholic_proxied", False):
+            raise httpx.ProxyError("warp_only blocked a direct connection attempt")
         return await _original_async_send(self, request, **kwargs)
     except Exception as exc:
         _record_transport_error(request, exc)
@@ -150,11 +153,18 @@ def _patched_async_client_init(self, *args, **kwargs):
         "response": merged_response,
     }
 
-    # 自动注入上下文代理：当调用方未显式指定代理参数时，从 ContextVar 继承
+    # 自动注入上下文代理：当调用方未显式指定有效代理参数（含 proxy=None）时，从 ContextVar 继承
     _proxy_url = _current_proxy.get(None)
-    if _proxy_url and "proxy" not in kwargs and "transport" not in kwargs:
+    if _proxy_url and not kwargs.get("proxy") and not kwargs.get("transport"):
         from core.utils import get_proxy
+        kwargs.pop("proxy", None)
+        kwargs.pop("transport", None)
         kwargs.update(get_proxy(_proxy_url, {}))
+    elif isinstance(kwargs.get("proxy"), str) and kwargs["proxy"].lower().startswith(("socks5://", "socks5h://")) and not kwargs.get("transport"):
+        from core.utils import get_proxy
+        kwargs.update(get_proxy(kwargs.pop("proxy"), {}))
+
+    self._zoaholic_proxied = bool(kwargs.get("proxy") or kwargs.get("transport"))
 
     _original_async_init(self, *args, **kwargs)
 
@@ -170,20 +180,23 @@ def install():
 
 
 @contextmanager
-def proxy_context(proxy_url: Optional[str] = None):
+def proxy_context(proxy_url: Optional[str] = None, *, require_proxy: bool = False):
     """设置当前上下文的代理 URL。
 
     在此上下文中裸创建的 httpx.AsyncClient() 会自动注入该代理，
-    无需每个调用点手动传递。已显式指定 proxy/proxies/transport 的不受影响。
+    无需每个调用点手动传递。require_proxy=True 时禁止任何直连发包（Fail-Closed）。
     """
-    if proxy_url:
-        token = _current_proxy.set(proxy_url)
-        try:
-            yield
-        finally:
-            _current_proxy.reset(token)
-    else:
+    if require_proxy and not (isinstance(proxy_url, str) and proxy_url.strip()):
+        raise httpx.ProxyError("warp_only requires a valid proxy URL; direct connection blocked")
+    proxy_token = _current_proxy.set(proxy_url) if proxy_url else None
+    req_token = _require_proxy.set(True) if require_proxy else None
+    try:
         yield
+    finally:
+        if req_token is not None:
+            _require_proxy.reset(req_token)
+        if proxy_token is not None:
+            _current_proxy.reset(proxy_token)
 
 
 # ==================== 查询接口 ====================

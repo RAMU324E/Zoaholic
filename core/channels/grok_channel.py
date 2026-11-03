@@ -543,14 +543,12 @@ class GrokProvider(OAuthProvider):
         return DEFAULT_TOKEN_URL
 
     def _resolve_proxy(self, config: dict | None = None) -> str | None:
+        from core.utils import resolve_provider_proxy
         provider = self._find_provider_config(config)
-        proxy = provider.get("preferences", {}).get("proxy")
+        runtime_config = config if config is not None else self._get_runtime_config()
+        proxy = resolve_provider_proxy(provider, runtime_config)
         if isinstance(proxy, str) and proxy.strip():
             return proxy.strip()
-        runtime_config = config if config is not None else self._get_runtime_config()
-        global_proxy = (runtime_config or {}).get("preferences", {}).get("proxy")
-        if isinstance(global_proxy, str) and global_proxy.strip():
-            return global_proxy.strip()
         return None
 
     def _resolve_base_url(self, config: dict | None = None) -> str:
