@@ -115,3 +115,9 @@ def test_oauth_manager_channel_proxy_context_enforces_warp_only(tmp_path, monkey
         client = httpx.AsyncClient(proxy=None)
         assert getattr(client, "_zoaholic_proxied", False) is True
         asyncio.run(client.aclose())
+
+    # Unsaved new Vertex channel during OAuth import must also default to WARP fail-closed
+    with mgr.channel_proxy_context("unsaved-vertex-channel", type_name="vertex"):
+        client2 = httpx.AsyncClient(proxy=None)
+        assert getattr(client2, "_zoaholic_proxied", False) is True
+        asyncio.run(client2.aclose())

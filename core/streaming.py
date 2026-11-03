@@ -71,15 +71,23 @@ class LoggingStreamingResponse(Response):
             })
             # 心跳也会提交 HTTP 200；内部预读和非流式组装则不能设置此标记。
             current_info["_stream_committed"] = True
-            async for chunk in logging_iterator:
-                await send({
-                    "type": "http.response.body", "body": chunk, "more_body": True,
-                })
-                # 正常帧和错误帧走同一记录入口，只保存 send 成功返回的字节。
-                if should_save and remaining:
-                    prefix = chunk[:remaining]
-                    response_chunks.append(prefix)
-                    remaining -= len(prefix)
+            from core.http import proxy_context
+            from core.utils import is_warp_only_provider, resolve_provider_proxy
+            _app_obj = self.app() if self.app else None
+            _provider_cfg = current_info.get("_provider_cfg") if isinstance(current_info, dict) else None
+            _cfg_obj = getattr(getattr(_app_obj, "state", None), "config", None) if _app_obj else None
+            _stream_proxy = resolve_provider_proxy(_provider_cfg, _cfg_obj)
+            _stream_req_proxy = is_warp_only_provider(_provider_cfg)
+            with proxy_context(_stream_proxy, require_proxy=_stream_req_proxy):
+                async for chunk in logging_iterator:
+                    await send({
+                        "type": "http.response.body", "body": chunk, "more_body": True,
+                    })
+                    # 正常帧和错误帧走同一记录入口，只保存 send 成功返回的字节。
+                    if should_save and remaining:
+                        prefix = chunk[:remaining]
+                        response_chunks.append(prefix)
+                        remaining -= len(prefix)
             await send({"type": "http.response.body", "body": b"", "more_body": False})
         except asyncio.CancelledError:
             if not current_info.get("_stream_error"):

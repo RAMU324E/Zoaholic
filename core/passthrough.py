@@ -733,7 +733,8 @@ async def process_request_passthrough(
                 else:
                     # force_stream 透传：上游流式 → 拼装成非流式 JSON
                     from .stream_convert import assemble_stream_to_json
-                    assembled = await assemble_stream_to_json(wrapped_generator)
+                    with proxy_context(proxy, require_proxy=require_proxy):
+                        assembled = await assemble_stream_to_json(wrapped_generator)
                     error = current_info.get("_stream_error") or extract_stream_error(assembled)
                     if error:
                         raise UpstreamStreamError(error)

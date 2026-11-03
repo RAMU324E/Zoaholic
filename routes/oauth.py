@@ -743,7 +743,7 @@ async def import_account(request: Request):
         if oauth_provider:
             try:
                 from contextlib import nullcontext
-                ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+                ctx = oauth_mgr.channel_proxy_context(channel_id, type_name=type_name) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
                 with ctx:
                     updated = await oauth_provider.refresh_token(token_data)
                 await oauth_mgr.register(channel_id, client_email, type_name, updated)
@@ -759,10 +759,10 @@ async def import_account(request: Request):
     try:
         if body.get("refresh_token") and oauth_provider:
             from contextlib import nullcontext
-            ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+            ctx = oauth_mgr.channel_proxy_context(channel_id, type_name=type_name) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
             with ctx:
                 if hasattr(oauth_mgr, "refresh_provider"):
-                    updated = await oauth_mgr.refresh_provider(type_name, token_data)
+                    updated = await oauth_mgr.refresh_provider(type_name, token_data, channel_id=channel_id)
                 else:
                     updated = await oauth_provider.refresh_token(token_data)
             email = updated.get("email")
@@ -831,10 +831,10 @@ async def batch_import(request: Request):
                         # 修改方式：优先走 OAuthManager.refresh_provider 以继承运行时配置注入；旧 manager 或测试替身缺失该方法时回退到 provider.refresh_token。
                         # 目的：保存更新后的 access_token 和可能轮换后的 refresh_token，减少导入后首次请求失败概率。
                         from contextlib import nullcontext
-                        ctx = oauth_mgr.channel_proxy_context(channel_id) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
+                        ctx = oauth_mgr.channel_proxy_context(channel_id, type_name=type_name) if hasattr(oauth_mgr, "channel_proxy_context") else nullcontext()
                         with ctx:
                             if hasattr(oauth_mgr, "refresh_provider"):
-                                token_data = await oauth_mgr.refresh_provider(type_name, token_data)
+                                token_data = await oauth_mgr.refresh_provider(type_name, token_data, channel_id=channel_id)
                             else:
                                 token_data = await oauth_provider.refresh_token(token_data)
 

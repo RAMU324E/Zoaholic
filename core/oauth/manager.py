@@ -229,13 +229,21 @@ class OAuthManager:
                 return p
         return None
 
-    def channel_proxy_context(self, channel_id: str | None = None):
-        """为指定渠道构建 proxy_context（含 warp_only 强制代理与阻断直连）。"""
+    def channel_proxy_context(self, channel_id: str | None = None, type_name: str | None = None):
+        """为指定渠道构建 proxy_context（含 warp_only 强制代理与阻断直连）。
+
+        若新建 Vertex 渠道尚未点保存就先点“导入凭证”，channel_config 为 None，
+        此时对 type_name=='vertex' 自动兜底走默认 WARP 代理，防止导入瞬间泄露真实 IP。
+        """
         from core.http import proxy_context
         from core.utils import is_warp_only_provider, resolve_provider_proxy
+        from plugins.warp_only import DEFAULT_WARP_PROXY, validate_warp_proxy_url
 
         channel_config = self._find_channel_config(channel_id) if channel_id else None
         config = self.get_config()
+        if channel_config is None and str(type_name or "").strip().lower() == "vertex":
+            proxy = validate_warp_proxy_url(os.environ.get("ZOAHOLIC_WARP_PROXY") or DEFAULT_WARP_PROXY)
+            return proxy_context(proxy, require_proxy=True)
         proxy = resolve_provider_proxy(channel_config, config if isinstance(config, dict) else None)
         require_proxy = is_warp_only_provider(channel_config)
         return proxy_context(proxy, require_proxy=require_proxy)
@@ -343,7 +351,7 @@ class OAuthManager:
                 f"Disk not writable, skipping refresh for {channel_id}:{key_id} "
                 f"to protect current refresh_token"
             )
-        with self.channel_proxy_context(channel_id):
+        with self.channel_proxy_context(channel_id, type_name=cred.get("type")):
             updated = await self._call_provider_method(provider.refresh_token, cred)
         updated["last_refresh"] = datetime.utcnow().isoformat() + "Z"
         updated["status"] = "active"
@@ -383,7 +391,7 @@ class OAuthManager:
         provider = self._providers.get(type_name)
         if not provider:
             raise ValueError(f"Unknown OAuth type: {type_name}")
-        with self.channel_proxy_context(channel_id):
+        with self.channel_proxy_context(channel_id, type_name=type_name):
             return await self._call_provider_method(provider.refresh_token, credential)
 
     async def exchange_code(
@@ -402,7 +410,7 @@ class OAuthManager:
         provider = self._providers.get(type_name)
         if not provider:
             raise ValueError(f"Unknown OAuth type: {type_name}")
-        with self.channel_proxy_context(channel_id):
+        with self.channel_proxy_context(channel_id, type_name=type_name):
             return await self._call_provider_method(
                 provider.exchange_code,
                 code=code,

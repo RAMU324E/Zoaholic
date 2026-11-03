@@ -272,7 +272,8 @@ async def process_request(
                 else:
                     # force_stream：上游流式 → 拼装成非流式 JSON 返回客户端
                     from .stream_convert import assemble_stream_to_json
-                    assembled = await assemble_stream_to_json(wrapped_generator)
+                    with proxy_context(proxy, require_proxy=require_proxy):
+                        assembled = await assemble_stream_to_json(wrapped_generator)
                     error = current_info.get("_stream_error") or extract_stream_error(assembled)
                     if error:
                         raise UpstreamStreamError(error)
