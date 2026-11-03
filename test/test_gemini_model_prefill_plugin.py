@@ -60,6 +60,8 @@ def test_option_parsing_keeps_commas_and_falls_back_to_default():
     assert resolve_prefill_text({"text": "好的，master"}) == "好的，master"
     assert resolve_prefill_text("text=a,b,c") == "a,b,c"
     assert resolve_prefill_text("plain text") == "plain text"
+    assert resolve_prefill_text("text=<think>\nxxx") == "<think>\nxxx"
+    assert resolve_prefill_text({"text": "<think>\nxxx\n"}) == "<think>\nxxx"
 
 
 def test_interceptor_reads_channel_options():

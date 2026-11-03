@@ -28,7 +28,7 @@ PARAMS_SCHEMA = [
     {
         "key": "text",
         "label": "预填充文本",
-        "type": "text",
+        "type": "textarea",
         "placeholder": DEFAULT_PREFILL,
         "default": DEFAULT_PREFILL,
         "hint": "追加到请求末尾的 model 消息内容；留空使用默认文本",
@@ -38,7 +38,7 @@ PARAMS_SCHEMA = [
 
 PLUGIN_INFO = {
     "name": PLUGIN_NAME,
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Gemini 末尾 model 预填充 — 在 contents 末尾追加一条 role:model 消息（跳过工具结果轮与已有 model 结尾）",
     "author": "Zoaholic Team",
     "dependencies": [],
