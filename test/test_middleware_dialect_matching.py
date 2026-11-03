@@ -36,6 +36,10 @@ def _middleware() -> StatsMiddleware:
         ("/v1beta/models/gemini-2.5-pro", True),
         ("/v1/models/gemini-2.5-pro:generateContent", True),
         ("/v1beta/models/gemini-2.5-pro:streamGenerateContent", True),
+        ("/v1/models/firebase/gemini-4-argon", True),
+        ("/v1beta/models/firebase/gemini-4-argon", True),
+        ("/v1/models/firebase/gemini-4-argon:generateContent", True),
+        ("/v1beta/models/firebase/gemini-4-argon:streamGenerateContent", True),
         # 非方言 /v1 端点：必须走中间件标准鉴权（回归点：曾被 /v1 前缀误判）
         ("/v1/logs", False),
         ("/v1/api_config", False),

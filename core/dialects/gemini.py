@@ -612,52 +612,52 @@ def register() -> None:
                     tags=["Gemini Dialect"],
                     summary="List Gemini Models (v1)",
                 ),
-                # GET /v1beta/models/{model} - 获取模型详情
+                # GET /v1beta/models/{model:path} - 获取模型详情
                 EndpointDefinition(
                     prefix="/v1beta",
-                    path="/models/{model}",
+                    path="/models/{model:path}",
                     methods=["GET"],
                     handler=get_gemini_model_handler,
                     tags=["Gemini Dialect"],
                     summary="Get Gemini Model",
                 ),
-                # GET /v1/models/{model} - 获取模型详情
+                # GET /v1/models/{model:path} - 获取模型详情
                 EndpointDefinition(
                     prefix="/v1",
-                    path="/models/{model}",
+                    path="/models/{model:path}",
                     methods=["GET"],
                     handler=get_gemini_model_handler,
                     tags=["Gemini Dialect"],
                     summary="Get Gemini Model (v1)",
                 ),
-                # POST /v1beta/models/{model}:generateContent - 非流式
+                # POST /v1beta/models/{model:path}:generateContent - 非流式
                 EndpointDefinition(
                     prefix="/v1beta",
-                    path="/models/{model}:generateContent",
+                    path="/models/{model:path}:generateContent",
                     methods=["POST"],
                     tags=["Gemini Dialect"],
                     summary="Generate Content",
                 ),
-                # POST /v1/models/{model}:generateContent - 非流式
+                # POST /v1/models/{model:path}:generateContent - 非流式
                 EndpointDefinition(
                     prefix="/v1",
-                    path="/models/{model}:generateContent",
+                    path="/models/{model:path}:generateContent",
                     methods=["POST"],
                     tags=["Gemini Dialect"],
                     summary="Generate Content (v1)",
                 ),
-                # POST /v1beta/models/{model}:streamGenerateContent - 流式
+                # POST /v1beta/models/{model:path}:streamGenerateContent - 流式
                 EndpointDefinition(
                     prefix="/v1beta",
-                    path="/models/{model}:streamGenerateContent",
+                    path="/models/{model:path}:streamGenerateContent",
                     methods=["POST"],
                     tags=["Gemini Dialect"],
                     summary="Stream Generate Content",
                 ),
-                # POST /v1/models/{model}:streamGenerateContent - 流式
+                # POST /v1/models/{model:path}:streamGenerateContent - 流式
                 EndpointDefinition(
                     prefix="/v1",
-                    path="/models/{model}:streamGenerateContent",
+                    path="/models/{model:path}:streamGenerateContent",
                     methods=["POST"],
                     tags=["Gemini Dialect"],
                     summary="Stream Generate Content (v1)",

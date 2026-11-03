@@ -112,7 +112,23 @@ async def patch_passthrough_gemini_payload(
     provider: dict,
     api_key=None,
 ) -> dict:
-    """透传模式下对 Gemini native payload 做渠道级修饰（system_prompt 注入）。"""
+    """透传模式下对 Gemini native payload 做渠道级修饰（system_prompt 与默认 safetySettings 注入）。"""
+    if "safetySettings" not in payload and "safety_settings" not in payload:
+        model_dict = get_model_dict(provider)
+        req_model = getattr(request, "model", "") or ""
+        original_model = model_dict.get(req_model, req_model)
+        if any(off_model in original_model for off_model in gemini_max_token_65k_models) or _is_image_model(original_model):
+            safety_threshold = "OFF"
+        else:
+            safety_threshold = "BLOCK_NONE"
+        payload["safetySettings"] = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": safety_threshold},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+        ]
+
     system_prompt = modifications.get("system_prompt")
     system_prompt_text = str(system_prompt).strip() if system_prompt is not None else ""
     if not system_prompt_text:
