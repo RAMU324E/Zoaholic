@@ -29,6 +29,43 @@ from ..usage import extract_cache_usage
 from ..file_utils import extract_base64_data
 
 
+def flatten_reasoning_content(val) -> str:
+    """将字符串或列表结构的 reasoning_content 扁平化为字符串。"""
+    if isinstance(val, str):
+        return val
+    if not isinstance(val, list):
+        return ""
+    parts = []
+    for item in val:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for key in ("text", "reasoning", "reasoning_content", "summary", "content"):
+                field_val = item.get(key)
+                if isinstance(field_val, str) and field_val:
+                    parts.append(field_val)
+                    break
+                if isinstance(field_val, list):
+                    nested = flatten_reasoning_content(field_val)
+                    if nested:
+                        parts.append(nested)
+                        break
+    return "".join(parts)
+
+
+def serialize_tool_message_content(content) -> str:
+    """将 Message.content 序列化为工具输出字符串。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        if all(x.type in ("text", "input_text", "output_text", "summary_text") for x in content):
+            return "\n".join(x.text if x.text is not None else "" for x in content)
+        return json_dumps_text([x.model_dump(exclude_none=True) for x in content], ensure_ascii=False)
+    return json_dumps_text(content, ensure_ascii=False)
+
+
 # ============================================================
 # OpenAI 格式化函数
 # ============================================================
@@ -131,16 +168,30 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
         # Message 使用 extra='allow'，客户端传入的非标准字段保存在 model_extra 中
         extra_fields = {k: v for k, v in (msg.model_extra or {}).items() if v is not None}
 
-        tool_calls = None
-        tool_call_id = None
+        if msg.role == "tool":
+            if not is_tools_disabled(provider):
+                tool_msg = {
+                    "role": "tool",
+                    "content": serialize_tool_message_content(msg.content),
+                    **extra_fields,
+                }
+                if msg.tool_call_id:
+                    tool_msg["tool_call_id"] = msg.tool_call_id
+                if msg.name:
+                    tool_msg["name"] = msg.name
+                messages.append(tool_msg)
+            continue
+
+        tool_calls = msg.tool_calls
+        tool_call_id = msg.tool_call_id
         if isinstance(msg.content, list):
             content = []
             # 修改原因：Responses API 的 input_* 转换和模型名判断已经移出通用 OpenAI 兼容渠道。
             # 修改方式：这里只构造标准 Chat Completions content item，并继续保留已有的图片和文本文件处理。
             # 目的：让模型能力和特殊格式由上游配置或专用渠道控制，而不是在 core 中硬编码模型名。
             for item in msg.content:
-                if item.type == "text":
-                    content.append(format_text_message(item.text))
+                if item.type in ("text", "input_text", "output_text", "summary_text"):
+                    content.append(format_text_message(item.text if item.text is not None else ""))
                 elif item.type == "image_url" and provider.get("image", True):
                     content.append(await format_image_message(item.image_url.url))
                 elif item.type == "file":
@@ -189,8 +240,6 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
             # 修改方式：非列表 content 保持请求原文，仅继续转发工具调用元数据。
             # 目的：避免 core 对模型行为做隐藏改写。
             content = msg.content
-            tool_calls = msg.tool_calls
-            tool_call_id = msg.tool_call_id
 
         if tool_calls:
             if not is_tools_disabled(provider):
@@ -199,21 +248,38 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
                 # 修改方式：工具未禁用时直接遍历全部 tool_calls。
                 # 目的：保证后续每个 tool_result 都能匹配到对应 tool_call。
                 for tool_call in tool_calls:
-                    tool_calls_list.append({
+                    tc_dict = {
                         "id": tool_call.id,
                         "type": tool_call.type,
                         "function": {
                             "name": tool_call.function.name,
                             "arguments": tool_call.function.arguments
                         }
-                    })
-                messages.append({"role": msg.role, "tool_calls": tool_calls_list, **extra_fields})
+                    }
+                    tc_extra = (tool_call.model_extra or {}).get("extra_content") or getattr(tool_call, "extra_content", None)
+                    if tc_extra:
+                        tc_dict["extra_content"] = tc_extra
+                    tool_calls_list.append(tc_dict)
+                normalized_content = content if content is not None else ""
+                if isinstance(normalized_content, list) and not normalized_content:
+                    normalized_content = ""
+                messages.append({
+                    "role": msg.role,
+                    "content": normalized_content,
+                    "tool_calls": tool_calls_list,
+                    **extra_fields,
+                })
+            elif content:
+                messages.append({"role": msg.role, "content": content, **extra_fields})
         elif tool_call_id:
             # 修改原因：禁用工具时不应继续转发 tool_result 历史。
             # 修改方式：沿用 provider.tools=False 作为唯一禁用判断。
             # 目的：保留禁用工具逻辑，同时删除工具模式变量。
             if not is_tools_disabled(provider):
-                messages.append({"role": msg.role, "tool_call_id": tool_call_id, "content": content, **extra_fields})
+                tool_msg = {"role": msg.role, "tool_call_id": tool_call_id, "content": content if content is not None else "", **extra_fields}
+                if msg.name:
+                    tool_msg["name"] = msg.name
+                messages.append(tool_msg)
         else:
             messages.append({"role": msg.role, "content": content, **extra_fields})
 
@@ -260,7 +326,7 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
 
 async def fetch_openai_response(client, url, headers, payload, model, timeout):
     """处理 OpenAI 兼容 API 的非流式响应"""
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
     
     error_message = await check_response(response, "fetch_openai_response")
@@ -269,7 +335,7 @@ async def fetch_openai_response(client, url, headers, payload, model, timeout):
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
     mark_adapter_metrics_managed()
     usage = safe_get(response_json, "usage", default={}) or {}
     # 非流式 OpenAI 兼容响应在同一个 usage 对象中携带缓存字段，随普通 token 一起写入 current_info。
@@ -305,6 +371,9 @@ async def fetch_openai_response(client, url, headers, payload, model, timeout):
         }
         yield response_embedContent
     else:
+        _msg = safe_get(response_json, "choices", 0, "message", default=None)
+        if isinstance(_msg, dict) and isinstance(_msg.get("reasoning_content"), list):
+            _msg["reasoning_content"] = flatten_reasoning_content(_msg["reasoning_content"])
         if safe_get(response_json, "choices", 0, "message", "content", default=None) or safe_get(response_json, "data", 0, "b64_json", default=None):
             mark_content_start()
         yield response_json
@@ -320,7 +389,7 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
     # 修改原因：core 不解析供应商私有思维链文本，避免把上游内容拆成 reasoning_content。
     # 修改方式：删除思维链解析状态变量，后续流式内容按原始 chunk 透传或按已有结构字段处理。
     # 目的：让思维链处理完全交给上游或插件。
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_gpt_response_stream")
@@ -379,18 +448,19 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
                 # 修改原因：Responses API 流式事件由 openai_responses_channel 处理，通用 OpenAI 渠道不再转换 response.* 事件。
                 # 修改方式：删除 response.* 专用分支以及供应商私有思维链文本解析，继续处理标准 Chat chunk。
                 # 目的：保证通用渠道不隐藏解析或改写上游原始内容。
+                _delta_obj = safe_get(line, "choices", 0, "delta", default=None)
+                if isinstance(_delta_obj, dict) and isinstance(_delta_obj.get("reasoning_content"), list):
+                    _delta_obj["reasoning_content"] = flatten_reasoning_content(_delta_obj["reasoning_content"])
+
                 no_stream_content = safe_get(line, "choices", 0, "message", "content", default=None)
                 openrouter_reasoning = safe_get(line, "choices", 0, "delta", "reasoning", default="")
+                if isinstance(openrouter_reasoning, list):
+                    openrouter_reasoning = flatten_reasoning_content(openrouter_reasoning)
                 # reasoning_details 数组格式回退：部分模型只返回 reasoning_details 而不带 reasoning
                 if not openrouter_reasoning:
                     _reasoning_details = safe_get(line, "choices", 0, "delta", "reasoning_details", default=None)
-                    if _reasoning_details and isinstance(_reasoning_details, list):
-                        _parts = []
-                        for _rd_item in _reasoning_details:
-                            if isinstance(_rd_item, dict) and _rd_item.get("text"):
-                                _parts.append(_rd_item["text"])
-                        if _parts:
-                            openrouter_reasoning = "".join(_parts)
+                    if isinstance(_reasoning_details, list):
+                        openrouter_reasoning = flatten_reasoning_content(_reasoning_details)
                 openrouter_base64_image = safe_get(line, "choices", 0, "delta", "images", 0, "image_url", "url", default="")
                 if openrouter_base64_image:
                     b64_pure = extract_base64_data(openrouter_base64_image if openrouter_base64_image.startswith("data:image/") else f"data:image/png;base64,{openrouter_base64_image}")
@@ -439,8 +509,63 @@ async def fetch_gpt_response_stream(client, url, headers, payload, model, timeou
                 else:
                     if no_stream_content:
                         del line["choices"][0]["message"]
-                    json_line = json_dumps_text(line, ensure_ascii=False)
-                    yield "data: " + json_line.strip() + end_of_line
+                    _choice0 = safe_get(line, "choices", 0, default=None)
+                    _delta0 = _choice0.get("delta") if isinstance(_choice0, dict) else None
+                    # 将工具调用与同帧的文本、推理和结束原因拆为独立增量，避免下游遗漏。
+                    if (
+                        isinstance(_choice0, dict)
+                        and isinstance(_delta0, dict)
+                        and _delta0.get("tool_calls")
+                        and (
+                            _delta0.get("content")
+                            or _delta0.get("reasoning_content")
+                            or _choice0.get("finish_reason")
+                        )
+                    ):
+                        _base_chunk = {k: v for k, v in line.items() if k not in ("choices", "usage")}
+                        _role = _delta0.get("role")
+                        if _delta0.get("reasoning_content"):
+                            mark_content_start()
+                            _rc_delta = {"reasoning_content": _delta0["reasoning_content"]}
+                            if _role:
+                                _rc_delta["role"] = _role
+                                _role = None
+                            _rc_chunk = {
+                                **_base_chunk,
+                                "choices": [{**_choice0, "delta": _rc_delta, "finish_reason": None}],
+                            }
+                            yield "data: " + json_dumps_text(_rc_chunk, ensure_ascii=False).strip() + end_of_line
+                        if _delta0.get("content"):
+                            mark_content_start()
+                            _ct_delta = {"content": _delta0["content"]}
+                            if _role:
+                                _ct_delta["role"] = _role
+                                _role = None
+                            _ct_chunk = {
+                                **_base_chunk,
+                                "choices": [{**_choice0, "delta": _ct_delta, "finish_reason": None}],
+                            }
+                            yield "data: " + json_dumps_text(_ct_chunk, ensure_ascii=False).strip() + end_of_line
+                        mark_content_start()
+                        _tc_delta = {"tool_calls": _delta0["tool_calls"]}
+                        if _role:
+                            _tc_delta["role"] = _role
+                        _tc_chunk = {
+                            **_base_chunk,
+                            "choices": [{**_choice0, "delta": _tc_delta, "finish_reason": None}],
+                        }
+                        yield "data: " + json_dumps_text(_tc_chunk, ensure_ascii=False).strip() + end_of_line
+                        if _choice0.get("finish_reason"):
+                            _fin_chunk = {
+                                **_base_chunk,
+                                "choices": [{**_choice0, "delta": {}, "finish_reason": _choice0["finish_reason"]}],
+                            }
+                            if "usage" in line:
+                                _fin_chunk["usage"] = line["usage"]
+                            yield "data: " + json_dumps_text(_fin_chunk, ensure_ascii=False).strip() + end_of_line
+                    else:
+                        json_line = json_dumps_text(line, ensure_ascii=False)
+                        yield "data: " + json_line.strip() + end_of_line
 
             if done_received:
                 break

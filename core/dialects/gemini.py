@@ -101,6 +101,10 @@ async def parse_gemini_request(
             if sys_text:
                 messages.append(Message(role="system", content=sys_text))
 
+    # Gemini 原生调用没有 id；按名称登记唯一调用 ID，供 functionResponse 配对。
+    _call_seq = 0
+    _pending_call_ids: Dict[str, List[str]] = {}
+
     # contents
     for content in native_body.get("contents", []) or []:
         if not isinstance(content, dict):
@@ -112,6 +116,10 @@ async def parse_gemini_request(
         parts = content.get("parts") or []
         if not isinstance(parts, list):
             continue
+
+        # 新的工具调用回合不应消费上一轮尚未配对的同名调用。
+        if role == "assistant" and any(isinstance(p, dict) and "functionCall" in p for p in parts):
+            _pending_call_ids.clear()
 
         content_items: List[ContentItem] = []
         text_acc: List[str] = []
@@ -136,7 +144,13 @@ async def parse_gemini_request(
             # 2. 处理函数调用 (Gemini native -> Canonical tool_calls)
             if "functionCall" in part:
                 fc = part["functionCall"]
-                tc_id = f"call_{len(tool_calls)}"
+                _fc_name = str(fc.get("name") or "")
+                tc_id = f"call_{_call_seq}"
+                _call_seq += 1
+                if part_signature:
+                    tc_id = f"{tc_id}__thought__{part_signature}"
+                if _fc_name:
+                    _pending_call_ids.setdefault(_fc_name, []).append(tc_id)
                 tc = {
                     "id": tc_id,
                     "type": "function",
@@ -153,11 +167,22 @@ async def parse_gemini_request(
             # 3. 处理函数返回 (Gemini native -> Canonical tool role)
             if "functionResponse" in part:
                 fr = part["functionResponse"]
+                _fr_name = fr.get("name")
+                _fr_queue = _pending_call_ids.get(_fr_name) if _fr_name else None
+                _fr_call_id = _fr_queue.pop(0) if _fr_queue else _fr_name
+                raw_resp = fr.get("response")
+                if isinstance(raw_resp, dict):
+                    resp_dict = {
+                        k: v for k, v in raw_resp.items()
+                        if not str(k).startswith("media_ref") and not (isinstance(v, dict) and "$ref" in v)
+                    }
+                else:
+                    resp_dict = raw_resp if raw_resp is not None else {}
                 messages.append(Message(
                     role="tool",
-                    name=fr.get("name"),
-                    content=json_dumps_text(fr.get("response") or {}, ensure_ascii=False),
-                    tool_call_id=fr.get("name") # Gemini 通常用 name 匹配
+                    name=_fr_name,
+                    content=json_dumps_text(resp_dict, ensure_ascii=False),
+                    tool_call_id=_fr_call_id
                 ))
                 continue
 
@@ -252,6 +277,49 @@ async def parse_gemini_request(
     )
 
 
+def _extract_tool_call_signature(tc: Dict[str, Any]) -> Optional[str]:
+    """提取 tool_call 的扩展签名或 id 中编码的签名。"""
+    extra = tc.get("extra_content")
+    google_extra = extra.get("google") if isinstance(extra, dict) else None
+    if isinstance(google_extra, dict):
+        for key in ("thoughtSignature", "thought_signature", "signature"):
+            if google_extra.get(key):
+                return google_extra[key]
+    for key in ("thoughtSignature", "thought_signature"):
+        if tc.get(key):
+            return tc[key]
+    tc_id = tc.get("id")
+    if isinstance(tc_id, str) and "__thought__" in tc_id:
+        return tc_id.split("__thought__", 1)[1]
+    return None
+
+
+def _build_gemini_function_call_part(
+    tc: Dict[str, Any],
+    fallback_signature: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """将 Canonical tool_call 转换为 Gemini functionCall，保留签名兜底。"""
+    fn = tc.get("function")
+    if not isinstance(fn, dict) or not fn.get("name"):
+        return None
+    raw_args = fn.get("arguments")
+    if isinstance(raw_args, dict):
+        args = raw_args
+    elif isinstance(raw_args, str) and raw_args:
+        try:
+            parsed_args = json_loads(raw_args)
+            args = parsed_args if isinstance(parsed_args, dict) else {}
+        except (ValueError, TypeError):
+            args = {}
+    else:
+        args = {}
+    part: Dict[str, Any] = {"functionCall": {"name": fn["name"], "args": args}}
+    sig = _extract_tool_call_signature(tc) or fallback_signature
+    if sig:
+        part["thoughtSignature"] = sig
+    return part
+
+
 async def render_gemini_response(
     canonical_response: Dict[str, Any],
     model: str,
@@ -306,30 +374,18 @@ async def render_gemini_response(
 
         # 3. 工具调用 (Tool Calls)
         # 如果存在 tool_calls，Gemini 期望渲染为 functionCall parts
-        tool_calls = msg.get("tool_calls") or []
-        for i, tc in enumerate(tool_calls):
-            fn = tc.get("function") or {}
-            try:
-                args = json_loads(fn.get("arguments") or "{}")
-            except:
-                args = {}
-            
-            part = {
-                "functionCall": {
-                    "name": fn.get("name"),
-                    "args": args
-                }
-            }
-            # 签名逻辑：第一个函数调用必须携带签名（如果是 Gemini 3 模型）
-            # 我们优先从 tool_call 的 extra_content 中找，或者使用消息级别的签名，缺失时使用官方跳过校验标记兜底
-            sig = (tc.get("extra_content") or {}).get("google", {}).get("thoughtSignature")
-            if not sig and i == 0:
-                sig = msg.get("thoughtSignature") or "skip_thought_signature_validator"
-            
-            if sig:
-                part["thoughtSignature"] = sig
-            
-            parts.append(part)
+        tool_calls = msg.get("tool_calls")
+        thought_signature = msg.get("thoughtSignature")
+        if isinstance(tool_calls, list):
+            for i, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+                part = _build_gemini_function_call_part(
+                    tc,
+                    fallback_signature=(thought_signature or "skip_thought_signature_validator") if i == 0 else None,
+                )
+                if part is not None:
+                    parts.append(part)
 
         # 4.兜底签名逻辑：如果没有工具调用，将签名附在最后一个文本块上
         if not tool_calls and msg.get("thoughtSignature") and parts:
@@ -459,6 +515,20 @@ async def render_gemini_stream(canonical_sse_chunk: str) -> str:
     elif content:
         # 普通 string content
         parts.append({"text": content})
+
+    tool_calls = delta.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for i, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                continue
+            part = _build_gemini_function_call_part(
+                tc,
+                fallback_signature=(thought_signature or "skip_thought_signature_validator") if i == 0 else None,
+            )
+            if part is not None:
+                if part.get("thoughtSignature"):
+                    thought_signature = None
+                parts.append(part)
 
     if thought_signature and parts:
         parts[-1]["thoughtSignature"] = thought_signature

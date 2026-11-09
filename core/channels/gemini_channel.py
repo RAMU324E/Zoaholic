@@ -7,7 +7,6 @@ Gemini 渠道适配器
 import re
 import json
 import copy
-import asyncio
 from datetime import datetime
 from uuid import uuid4
 
@@ -152,6 +151,41 @@ async def patch_passthrough_gemini_payload(
     return payload
 
 
+def extract_tool_call_signature(tc) -> str | None:
+    """提取 ToolCall 扩展字段或 id(__thought__) 中的签名。"""
+    model_extra = getattr(tc, "model_extra", None) or {}
+    extra = getattr(tc, "extra_content", None) or model_extra.get("extra_content")
+    google_extra = extra.get("google") if isinstance(extra, dict) else None
+    if isinstance(google_extra, dict):
+        for key in ("thoughtSignature", "thought_signature", "signature"):
+            if google_extra.get(key):
+                return google_extra[key]
+    for key in ("thoughtSignature", "thought_signature"):
+        sig = getattr(tc, key, None) or model_extra.get(key)
+        if sig:
+            return sig
+    tc_id = getattr(tc, "id", None)
+    if isinstance(tc_id, str) and "__thought__" in tc_id:
+        return tc_id.split("__thought__", 1)[1]
+    return None
+
+
+def _extract_tool_result_text(content) -> str:
+    """将 tool content 的字符串或文本列表归一化为纯文本。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts)
+    return str(content)
+
+
 async def get_gemini_payload(request, engine, provider, api_key=None):
     """构建 Gemini API 的请求 payload"""
     headers = {
@@ -200,10 +234,11 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     try:
         request_messages = [Message(role="user", content=request.prompt)]
     except Exception:
-        request_messages = copy.deepcopy(request.messages)
+        request_messages = request.messages
     for msg in request_messages:
-        if msg.role == "assistant":
-            msg.role = "model"
+        role = msg.role
+        if role == "assistant":
+            role = "model"
         
         parts = []
         # 提取该消息可能携带的签名
@@ -253,7 +288,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             parts.append({"text": msg.content})
 
         # 3. 处理工具调用 (Model 角色下)
-        if msg.role == "model" and msg.tool_calls:
+        if role == "model" and msg.tool_calls:
             for i, tc in enumerate(msg.tool_calls):
                 # 转换 arguments
                 try:
@@ -272,7 +307,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                 if getattr(tc, "id", None):
                     tool_call_name_map[tc.id] = tc.function.name
                 # 签名逻辑：第一个 FC 必须携带签名；若历史消息无签名则用 Google 官方规定的跳过校验标记兜底
-                sig = (getattr(tc, "extra_content", {}) or {}).get("google", {}).get("thoughtSignature")
+                sig = extract_tool_call_signature(tc)
                 if not sig and i == 0:
                     sig = msg_signature or "skip_thought_signature_validator"
                 
@@ -288,7 +323,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             parts[-1]["thoughtSignature"] = msg_signature
 
         # 5. 处理函数响应 (Tool 角色下)
-        if msg.role == "tool":
+        if role == "tool":
             fc_name = None
             if msg.tool_call_id:
                 fc_name = tool_call_name_map.get(msg.tool_call_id)
@@ -302,7 +337,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             fr_part = {
                 "functionResponse": {
                     "name": fc_name,
-                    "response": {"result": msg.content}
+                    "response": {"result": _extract_tool_result_text(msg.content)}
                 }
             }
             if messages and messages[-1].get("role") == "user" and any("functionResponse" in p for p in messages[-1].get("parts", [])):
@@ -312,9 +347,9 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                     "role": "user",
                     "parts": [fr_part]
                 })
-        elif msg.role != "system" and parts:
-            messages.append({"role": msg.role, "parts": parts})
-        elif msg.role == "system":
+        elif role != "system" and parts:
+            messages.append({"role": role, "parts": parts})
+        elif role == "system":
             # 系统提示词处理逻辑保持不变
             sys_text = "".join([p.get("text", "") for p in parts if "text" in p])
             sys_text = re.sub(r"_+", "_", sys_text)
@@ -831,7 +866,7 @@ def gemini_json_process(response_json):
 async def fetch_gemini_response(client, url, headers, payload, model, timeout):
     """处理 Gemini 非流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
     
     error_message = await check_response(response, "fetch_gemini_response")
@@ -840,7 +875,7 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
 
     if isinstance(response_json, str):
         import ast
@@ -997,7 +1032,7 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
 async def fetch_gemini_response_stream(client, url, headers, payload, model, timeout):
     """处理 Gemini 流式响应"""
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_bytes, payload)
+    json_payload = json_dumps_bytes(payload)
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_gemini_response_stream")
         if error_message:

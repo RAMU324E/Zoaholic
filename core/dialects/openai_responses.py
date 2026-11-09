@@ -24,123 +24,193 @@ if TYPE_CHECKING:
 # ============================================================
 
 
+def _normalize_tool_arguments(raw_args: Any) -> str:
+    if raw_args is None:
+        return "{}"
+    if isinstance(raw_args, str):
+        return raw_args
+    return json_dumps_text(raw_args, ensure_ascii=False)
+
+
+def _normalize_tool_output(output_val: Any) -> str:
+    if output_val is None:
+        return ""
+    if isinstance(output_val, str):
+        return output_val
+    return json_dumps_text(output_val, ensure_ascii=False)
+
+
+def _normalize_tool_call_entry(raw_tc: Dict[str, Any], fallback_id: str) -> Dict[str, Any]:
+    fn_obj = raw_tc.get("function")
+    if not isinstance(fn_obj, dict):
+        fn_obj = {}
+    call_id = raw_tc.get("call_id") or raw_tc.get("id") or fallback_id
+    raw_name = raw_tc.get("name") or fn_obj.get("name")
+    if raw_tc.get("arguments") is not None:
+        raw_args = raw_tc["arguments"]
+    elif fn_obj.get("arguments") is not None:
+        raw_args = fn_obj["arguments"]
+    else:
+        raw_args = raw_tc.get("input")
+    tc_dict = {
+        "id": str(call_id),
+        "type": "function",
+        "function": {
+            "name": str(raw_name) if raw_name is not None else "",
+            "arguments": _normalize_tool_arguments(raw_args),
+        },
+    }
+    if raw_tc.get("extra_content"):
+        tc_dict["extra_content"] = raw_tc["extra_content"]
+    return tc_dict
+
+
+def _append_or_merge_assistant_tool_call(
+    messages: List[Dict[str, Any]],
+    tc_dict: Dict[str, Any],
+    pending_reasoning: str = "",
+) -> None:
+    if messages and messages[-1].get("role") == "assistant" and "tool_call_id" not in messages[-1]:
+        prev = messages[-1]
+        if prev.get("content") is None:
+            prev["content"] = ""
+        prev.setdefault("tool_calls", []).append(tc_dict)
+        if pending_reasoning and not prev.get("reasoning_content"):
+            prev["reasoning_content"] = pending_reasoning
+    else:
+        msg = {"role": "assistant", "content": "", "tool_calls": [tc_dict]}
+        if pending_reasoning:
+            msg["reasoning_content"] = pending_reasoning
+        messages.append(msg)
+
+
 def convert_responses_input_to_messages(input_data: Union[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """
-    将 Responses API 的 input 转换为 Chat Completions 的 messages 格式
-
-    Responses API input 格式：
-    - 字符串: 直接作为 user 消息
-    - 数组: 消息列表，每个消息包含 role 和 content
-      - content 可以是字符串或数组
-      - 数组中的 item 类型: input_text, input_image, input_audio 等
-
-    Args:
-        input_data: Responses API 的 input 字段
-
-    Returns:
-        Chat Completions 格式的 messages 列表
-    """
-    messages = []
-
-    # 如果是字符串，直接作为 user 消息
+    """将 Responses 消息、推理、工具调用和工具结果转换为 Chat Completions 消息。"""
     if isinstance(input_data, str):
         return [{"role": "user", "content": input_data}]
 
-    # 如果是列表，逐个转换
-    if isinstance(input_data, list):
-        for item in input_data:
-            if isinstance(item, str):
-                # 字符串直接作为 user 消息
-                messages.append({"role": "user", "content": item})
-            elif isinstance(item, dict):
-                # Responses represents calls/results as separate input items, not messages.
-                if item.get("type") == "function_call":
-                    call = {"id": item.get("call_id") or item.get("id"), "type": "function",
-                            "function": {"name": item.get("name", ""),
-                                         "arguments": item.get("arguments", "{}")}}
-                    if messages and messages[-1].get("role") == "assistant":
-                        messages[-1].setdefault("tool_calls", []).append(call)
-                    else:
-                        messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    continue
-                if item.get("type") == "function_call_output":
-                    output = item.get("output", "")
-                    messages.append({"role": "tool", "tool_call_id": item.get("call_id"),
-                                     "content": output if isinstance(output, str) else json_dumps_text(output)})
-                    continue
-                role = item.get("role", "user")
-                content = item.get("content")
-
-                # 处理 content
-                if content is None:
-                    continue
-
-                if isinstance(content, str):
-                    # 字符串 content 直接使用
-                    messages.append({"role": role, "content": content})
-                elif isinstance(content, list):
-                    # 数组 content，需要转换 type
-                    converted_content = []
-                    for content_item in content:
-                        if isinstance(content_item, str):
-                            converted_content.append({"type": "text", "text": content_item})
-                        elif isinstance(content_item, dict):
-                            item_type = content_item.get("type", "")
-
-                            # input_text -> text
-                            if item_type in ("input_text", "output_text"):
-                                converted_content.append({
-                                    "type": "text",
-                                    "text": content_item.get("text", "")
-                                })
-                            # input_image -> image_url
-                            elif item_type == "input_image":
-                                image_url = content_item.get("image_url") or content_item.get("url")
-                                if image_url:
-                                    converted_content.append({
-                                        "type": "image_url",
-                                        "image_url": {"url": image_url}
-                                    })
-                            # input_audio -> file
-                            elif item_type == "input_audio":
-                                data = content_item.get("input_audio", {}).get("data", "")
-                                if data:
-                                    converted_content.append({
-                                        "type": "file",
-                                        "file": {"mime_type": "audio/wav", "data": data}
-                                    })
-                            # input_file -> file
-                            elif item_type == "input_file":
-                                file_obj = {}
-                                for field in ["file_id", "filename", "file_url", "file_data"]:
-                                    val = content_item.get(field)
-                                    if val is not None:
-                                        if field == "file_url" or (field == "file_data" and str(val).startswith("data:")):
-                                            file_obj["url"] = val
-                                        elif field == "file_data":
-                                            file_obj["data"] = val
-                                        else:
-                                            file_obj[field] = val
-                                converted_content.append({
-                                    "type": "file",
-                                    "file": file_obj
-                                })
-                            # 其他类型原样传递
-                            else:
-                                # 尝试保留原有格式（如 text, image_url）
-                                if item_type == "text":
-                                    converted_content.append(content_item)
-                                elif item_type == "image_url":
-                                    converted_content.append(content_item)
-                                else:
-                                    converted_content.append(content_item)
-
-                    if converted_content:
-                        messages.append({"role": role, "content": converted_content})
+    messages = []
+    if not isinstance(input_data, list):
+        return messages
+    call_seq = 0
+    pending_reasoning = ""
+    for item in input_data:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        top_type = item.get("type", "")
+        if top_type == "reasoning":
+            summary_parts = []
+            for key in ("summary", "content"):
+                blocks = item.get(key)
+                if isinstance(blocks, list):
+                    for block in blocks:
+                        if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]:
+                            summary_parts.append(block["text"])
+            if summary_parts:
+                reasoning_text = "".join(summary_parts)
+                if messages and messages[-1].get("role") == "assistant":
+                    prev_rc = messages[-1].get("reasoning_content")
+                    messages[-1]["reasoning_content"] = (
+                        f"{prev_rc}{reasoning_text}" if isinstance(prev_rc, str) and prev_rc else reasoning_text
+                    )
                 else:
-                    # 其他类型尝试转为字符串
-                    messages.append({"role": role, "content": str(content)})
+                    pending_reasoning = f"{pending_reasoning}{reasoning_text}"
+            continue
+        if top_type in ("function_call", "custom_tool_call"):
+            tc_dict = _normalize_tool_call_entry(item, f"call_{call_seq}")
+            call_seq += 1
+            _append_or_merge_assistant_tool_call(messages, tc_dict, pending_reasoning)
+            pending_reasoning = ""
+            continue
 
+        role = item.get("role", "user")
+        content = item.get("content")
+        if (
+            top_type in ("function_call_output", "custom_tool_call_output")
+            or role == "tool"
+            or (item.get("tool_call_id") and top_type != "message")
+        ):
+            call_id = item.get("call_id") or item.get("tool_call_id") or item.get("id") or f"call_{call_seq}"
+            call_seq += 1
+            raw_output = item.get("output") if "output" in item else content
+            tool_msg = {"role": "tool", "tool_call_id": str(call_id), "content": _normalize_tool_output(raw_output)}
+            if item.get("name"):
+                tool_msg["name"] = str(item["name"])
+            messages.append(tool_msg)
+            continue
+
+        inline_tool_calls = []
+        if isinstance(item.get("tool_calls"), list):
+            for raw_tc in item["tool_calls"]:
+                if isinstance(raw_tc, dict):
+                    inline_tool_calls.append(_normalize_tool_call_entry(raw_tc, f"call_{call_seq}"))
+                    call_seq += 1
+
+        converted_msg = None
+        if content is None:
+            if inline_tool_calls:
+                converted_msg = {"role": role, "content": "", "tool_calls": inline_tool_calls}
+        elif isinstance(content, str):
+            converted_msg = {"role": role, "content": content}
+            if inline_tool_calls:
+                converted_msg["tool_calls"] = inline_tool_calls
+        elif isinstance(content, list):
+            converted_content = []
+            for content_item in content:
+                if isinstance(content_item, str):
+                    converted_content.append({"type": "text", "text": content_item})
+                elif isinstance(content_item, dict):
+                    item_type = content_item.get("type", "")
+                    if item_type in ("input_text", "output_text", "text", "summary_text"):
+                        text_val = content_item.get("text", "")
+                        if text_val is not None and text_val != "":
+                            converted_content.append({"type": "text", "text": text_val})
+                    elif item_type in ("tool_use", "function_call", "custom_tool_call"):
+                        inline_tool_calls.append(_normalize_tool_call_entry(content_item, f"call_{call_seq}"))
+                        call_seq += 1
+                    elif item_type == "input_image":
+                        image_url = content_item.get("image_url") or content_item.get("url")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url")
+                        if image_url:
+                            converted_content.append({"type": "image_url", "image_url": {"url": image_url}})
+                    elif item_type == "input_audio":
+                        data = content_item.get("input_audio", {}).get("data", "")
+                        if data:
+                            converted_content.append({"type": "file", "file": {"mime_type": "audio/wav", "data": data}})
+                    elif item_type == "input_file":
+                        file_obj = {}
+                        for field in ["file_id", "filename", "file_url", "file_data"]:
+                            val = content_item.get(field)
+                            if val is not None:
+                                if field == "file_url" or (field == "file_data" and str(val).startswith("data:")):
+                                    file_obj["url"] = val
+                                elif field == "file_data":
+                                    file_obj["data"] = val
+                                else:
+                                    file_obj[field] = val
+                        converted_content.append({"type": "file", "file": file_obj})
+                    else:
+                        converted_content.append(content_item)
+            if converted_content or inline_tool_calls:
+                converted_msg = {"role": role, "content": converted_content if converted_content else ""}
+                if inline_tool_calls:
+                    converted_msg["tool_calls"] = inline_tool_calls
+        else:
+            converted_msg = {"role": role, "content": str(content)}
+            if inline_tool_calls:
+                converted_msg["tool_calls"] = inline_tool_calls
+
+        if converted_msg is not None:
+            if role == "assistant" and pending_reasoning:
+                converted_msg["reasoning_content"] = pending_reasoning
+                pending_reasoning = ""
+            if item.get("reasoning_content") and not converted_msg.get("reasoning_content"):
+                converted_msg["reasoning_content"] = item["reasoning_content"]
+            messages.append(converted_msg)
     return messages
 
 

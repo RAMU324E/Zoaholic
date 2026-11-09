@@ -300,6 +300,8 @@ def normalize_vertex_payload(payload: dict) -> dict:
 
 async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     """构建 Vertex Gemini API 的请求 payload"""
+    from .gemini_channel import _extract_tool_result_text, extract_tool_call_signature
+
     headers = {
         'Content-Type': 'application/json'
     }
@@ -359,10 +361,10 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     # 目的：保证 functionCall 与 functionResponse 的数量和名称一一对应，孤立 tool 响应按声明的 name/tool_call_id 命名而非崩溃。
     tool_call_name_map = {}
     pending_fc_names = []
-    request_messages = copy.deepcopy(request.messages)
-    for msg in request_messages:
-        if msg.role == "assistant":
-            msg.role = "model"
+    for msg in request.messages:
+        role = msg.role
+        if role == "assistant":
+            role = "model"
         content = []
         # 修改原因：Gemini 3.7+ 要求多轮对话中 functionCall parts 携带 thoughtSignature，缺失会 400。
         # 修改方式：从消息的 thoughtSignature 属性和 tool_call 的 extra_content.google.thoughtSignature 提取签名，
@@ -413,7 +415,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
         if reasoning:
             content.append({"thought": True, "text": reasoning})
 
-        if msg.role == "model" and msg.tool_calls:
+        if role == "model" and msg.tool_calls:
             # 修改原因：工具调用可能与思维链/文本共存于同一 model 回合。
             # 修改方式：functionCall 追加到已有 content parts 之后，不再要求 content 为空，arguments 解析失败降级为空对象。
             # 目的：保留全部 parts，避免 functionCall 丢失导致后续 functionResponse 无对应调用。
@@ -432,7 +434,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                     tool_call_name_map[tool_call.id] = tool_call.function.name
                 pending_fc_names.append(tool_call.function.name)
                 # thoughtSignature：优先从 tool_call.extra_content 取，首个 FC 兜底用消息级签名或官方跳过校验标记
-                sig = (getattr(tool_call, "extra_content", {}) or {}).get("google", {}).get("thoughtSignature")
+                sig = extract_tool_call_signature(tool_call)
                 if not sig and i == 0:
                     sig = msg_signature or "skip_thought_signature_validator"
                 if sig:
@@ -445,7 +447,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                     "parts": content
                 }
             )
-        elif msg.role == "tool":
+        elif role == "tool":
             if msg.tool_call_id and msg.tool_call_id in tool_call_name_map:
                 function_call_name = tool_call_name_map[msg.tool_call_id]
             elif msg.name:
@@ -463,7 +465,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                     "response": {
                         "name": function_call_name,
                         "content": {
-                            "result": msg.content,
+                            "result": _extract_tool_result_text(msg.content),
                         }
                     }
                 }
@@ -477,12 +479,12 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                         "parts": [fr_part]
                     }
                 )
-        elif msg.role != "system" and content:
+        elif role != "system" and content:
             # 无 tool_calls 时若有残余签名，附到最后一个 part
             if msg_signature:
                 content[-1]["thoughtSignature"] = msg_signature
-            messages.append({"role": msg.role, "parts": content})
-        elif msg.role == "system" and content:
+            messages.append({"role": role, "parts": content})
+        elif role == "system" and content:
             system_prompt = system_prompt + "\n\n" + content[0]["text"]
     if system_prompt.strip():
         systemInstruction = {"parts": [{"text": system_prompt}]}
@@ -901,7 +903,7 @@ async def get_vertex_claude_payload(request, engine, provider, api_key=None):
     if request.tools and not is_tools_disabled(provider):
         tools = []
         for tool in request.tools:
-            json_tool = await gpt2claude_tools_json(tool.dict()["function"])
+            json_tool = await gpt2claude_tools_json((tool if isinstance(tool, dict) else tool.model_dump())["function"])
             tools.append(json_tool)
         payload["tools"] = tools
         if "tool_choice" in payload:
@@ -945,7 +947,7 @@ async def fetch_vertex_claude_response(client, url, headers, payload, model, tim
     url = url.replace("streamRawPredict", "rawPredict")
     
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
     
     error_message = await check_response(response, "fetch_vertex_claude_response")
@@ -954,7 +956,7 @@ async def fetch_vertex_claude_response(client, url, headers, payload, model, tim
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
     mark_adapter_metrics_managed()
     
     # Vertex Claude 格式解析与标准 Claude 类似；缓存字段也要按 Claude 口径补入 prompt_tokens。
@@ -1015,7 +1017,7 @@ async def fetch_vertex_claude_response_stream(client, url, headers, payload, mod
     from ..log_config import logger
     
     timestamp = int(datetime.timestamp(datetime.now()))
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_vertex_claude_response_stream")
         if error_message:

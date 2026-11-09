@@ -159,10 +159,10 @@ def _patched_async_client_init(self, *args, **kwargs):
         from core.utils import get_proxy
         kwargs.pop("proxy", None)
         kwargs.pop("transport", None)
-        kwargs.update(get_proxy(_proxy_url, {}))
-    elif isinstance(kwargs.get("proxy"), str) and kwargs["proxy"].lower().startswith(("socks5://", "socks5h://")) and not kwargs.get("transport"):
+        kwargs = get_proxy(_proxy_url, kwargs)
+    elif isinstance(kwargs.get("proxy"), str) and kwargs["proxy"].lower().startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")) and not kwargs.get("transport"):
         from core.utils import get_proxy
-        kwargs.update(get_proxy(kwargs.pop("proxy"), {}))
+        kwargs = get_proxy(kwargs.pop("proxy"), kwargs)
 
     self._zoaholic_proxied = bool(kwargs.get("proxy") or kwargs.get("transport"))
 

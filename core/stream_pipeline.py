@@ -14,7 +14,7 @@ import h2.exceptions
 import httpx
 from fastapi import HTTPException
 
-from core.json_utils import json_dumps_text, json_loads
+from core.json_utils import ORJSON_AVAILABLE, json_dumps_text, json_loads
 from core.log_config import logger
 from core.utils import safe_get
 from core.stream_utils import close_async_iterator, OwnedAsyncIterator
@@ -27,9 +27,8 @@ async def ensure_string(item, as_sse: bool = True):
     elif isinstance(item, str):
         return item
     elif isinstance(item, dict):
-        # 大 dict（如含 base64 图片的响应）同步序列化会阻塞事件循环，
-        # 放到线程池执行，避免高并发生图时 event loop block
-        json_str = await asyncio.to_thread(json_dumps_text, item)
+        # 仅标准库 JSON 回退路径使用线程池。
+        json_str = json_dumps_text(item) if ORJSON_AVAILABLE else await asyncio.to_thread(json_dumps_text, item)
         if as_sse:
             return f"data: {json_str}\n\n"
         return json_str

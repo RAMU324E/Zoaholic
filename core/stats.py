@@ -491,6 +491,7 @@ def get_current_model_prices(app, model_name: str, provider_name: str = None):
         (prompt_price, completion_price, cached_price) 元组
     """
     from utils import safe_get
+    from .default_prices import lookup_price, strip_upstream_context_tag
     try:
         provider_prices = {}
         global_prices = safe_get(app.state.config, 'preferences', 'model_price', default={})
@@ -508,6 +509,11 @@ def get_current_model_prices(app, model_name: str, provider_name: str = None):
                     result = _match_model_price(provider_prices, model_name, use_default=False)
                     if result is not None:
                         return result
+                    # 剥离 model_prefix 之后，继续剥离 <上游>-<上下文>- 标签。
+                    model_name = strip_upstream_context_tag(model_name)
+                    result = _match_model_price(provider_prices, model_name, use_default=False)
+                    if result is not None:
+                        return result
                     break
 
         # 2. 全局精确/前缀匹配（不用 default）
@@ -515,9 +521,16 @@ def get_current_model_prices(app, model_name: str, provider_name: str = None):
         if result is not None:
             return result
 
+        # 剥离 <上游>-<上下文>- 或 <渠道>-<上游>-<上下文>- 标签后重试全局价格。
+        stripped_model_name = strip_upstream_context_tag(model_name, allow_channel_prefix=True)
+        if stripped_model_name != model_name:
+            model_name = stripped_model_name
+            result = _match_model_price(global_prices, model_name, use_default=False)
+            if result is not None:
+                return result
+
         # 3. 外部价格库 fallback
         try:
-            from .default_prices import lookup_price
             result = lookup_price(model_name)
             if result is not None:
                 return result

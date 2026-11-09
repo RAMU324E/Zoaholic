@@ -162,12 +162,22 @@ async def get_responses_payload(request, engine, provider, api_key=None):
                     instructions_list.append(content or "")
                 continue
 
+        # 工具结果必须先处理，避免 list content 被当作普通消息。
+        if role == "tool" or tool_call_id:
+            from .openai_channel import serialize_tool_message_content
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": tool_call_id or msg.name or "call_0",
+                "output": serialize_tool_message_content(content),
+            })
+            continue
+
         # content(list) -> message(content=[input_text/input_image...])
         if isinstance(content, list):
             content_items = []
             for item in content:
-                if getattr(item, "type", None) == "text":
-                    content_items.append(format_text_item(item.text, role))
+                if getattr(item, "type", None) in ("text", "input_text", "output_text", "summary_text"):
+                    content_items.append(format_text_item(item.text if item.text is not None else "", role))
                 elif getattr(item, "type", None) == "image_url" and provider.get("image", True):
                     image_item = await format_input_image(item.image_url.url)
                     content_items.append(image_item)
@@ -195,32 +205,24 @@ async def get_responses_payload(request, engine, provider, api_key=None):
             if content_items:
                 input_items.append({"type": "message", "role": role, "content": content_items})
 
-        # tool result -> function_call_output（顶层 item）
-        elif tool_call_id:
-            input_items.append({
-                "type": "function_call_output",
-                "call_id": tool_call_id,
-                "output": content or "",
-            })
-
         else:
             # 文本消息
-            if content or role == "assistant":
+            if content or (role == "assistant" and not tool_calls):
                 input_items.append({
                     "type": "message",
                     "role": role,
                     "content": [format_text_item(content or "", role)],
                 })
 
-            # tool_calls -> function_call（顶层 item）
-            if tool_calls:
-                for tool_call in tool_calls:
-                    input_items.append({
-                        "type": "function_call",
-                        "call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments,
-                    })
+        # tool_calls -> function_call（顶层 item），独立于 content 的类型。
+        if tool_calls:
+            for tool_call in tool_calls:
+                input_items.append({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                })
 
     # 构建 payload
     payload = {
@@ -394,7 +396,7 @@ async def get_responses_payload(request, engine, provider, api_key=None):
 
 async def fetch_responses_response(client, url, headers, payload, model, timeout):
     """处理 Responses API 的非流式响应"""
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
     response = await client.post(url, headers=headers, content=json_payload, timeout=timeout)
 
     error_message = await check_response(response, "fetch_responses_response")
@@ -403,7 +405,7 @@ async def fetch_responses_response(client, url, headers, payload, model, timeout
         return
 
     response_bytes = await response.aread()
-    response_json = await asyncio.to_thread(json_loads, response_bytes)
+    response_json = json_loads(response_bytes)
 
     error = extract_stream_error(response_json)
     if error:
@@ -847,7 +849,7 @@ async def _responses_events_to_sse(events, model):
 
 async def fetch_responses_stream(client, url, headers, payload, model, timeout):
     """处理 Responses API 的流式响应（HTTP SSE 传输）"""
-    json_payload = await asyncio.to_thread(json_dumps_text, payload)
+    json_payload = json_dumps_text(payload)
 
     async with client.stream('POST', url, headers=headers, content=json_payload, timeout=timeout) as response:
         error_message = await check_response(response, "fetch_responses_stream")
