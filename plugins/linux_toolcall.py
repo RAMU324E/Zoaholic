@@ -64,7 +64,7 @@ PARAMS_SCHEMA = [
         "key": "clean_tools",
         "label": "清洗所有其他工具 (单工具增强)",
         "type": "toggle",
-        "default": True,
+        "default": False,
         "hint": "开启后剥离请求自带的其他 tools 定义，仅保留破限工具以配合 ANY 模式 100% 锁定工具输出",
         "serialize": "key_value",
     },
