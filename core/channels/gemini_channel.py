@@ -214,8 +214,11 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     if provider['base_url'].endswith('#'):
         url = provider['base_url'][:-1].rstrip('/')
     else:
-        # 正常路径拼接
-        url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path.split('/models')[0].rstrip('/')}/models/{original_model}:{gemini_stream}{sse_param}"
+        # 正常路径拼接：仅剥离末尾的 /models 后缀，保留诸如 /models/genai/v1 的网关前缀
+        base_path = parsed_url.path.rstrip('/')
+        if base_path.endswith('/models'):
+            base_path = base_path[:-len('/models')]
+        url = f"{parsed_url.scheme}://{parsed_url.netloc}{base_path}/models/{original_model}:{gemini_stream}{sse_param}"
 
     if "/v1beta" in parsed_url.path:
         api_version = "v1beta"

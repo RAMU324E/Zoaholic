@@ -62,6 +62,32 @@ def test_strip_url_key_param():
     assert pool._strip_url_key_param("https://x.y/z?alt=sse") == "https://x.y/z?alt=sse"
 
 
+def test_gemini_channel_preserves_kaggle_models_prefix():
+    src = (Path(__file__).resolve().parents[1] / "core/channels/gemini_channel.py").read_text(encoding="utf-8")
+    assert "if base_path.endswith('/models'):" in src
+    assert "parsed_url.path.split('/models')[0]" not in src
+    from urllib.parse import urlparse
+
+    def build_gemini_url(base_url: str, original_model: str, gemini_stream: str = "generateContent", sse_param: str = "") -> str:
+        parsed_url = urlparse(base_url)
+        if base_url.endswith('#'):
+            return base_url[:-1].rstrip('/')
+        base_path = parsed_url.path.rstrip('/')
+        if base_path.endswith('/models'):
+            base_path = base_path[:-len('/models')]
+        return f"{parsed_url.scheme}://{parsed_url.netloc}{base_path}/models/{original_model}:{gemini_stream}{sse_param}"
+
+    assert build_gemini_url("https://mp-staging.kaggle.net/models/genai/v1", "gemini-4-argon") == (
+        "https://mp-staging.kaggle.net/models/genai/v1/models/gemini-4-argon:generateContent"
+    )
+    assert build_gemini_url("https://generativelanguage.googleapis.com/v1beta", "gemini-4-argon") == (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent"
+    )
+    assert build_gemini_url("https://generativelanguage.googleapis.com/v1beta/models", "gemini-4-argon") == (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:generateContent"
+    )
+
+
 def test_slot_validity_and_renewal_window():
     now = time.time()
     valid = {"verifier_token": "kaggleweb:CiQAAA", "expires_at": now + 3600}
