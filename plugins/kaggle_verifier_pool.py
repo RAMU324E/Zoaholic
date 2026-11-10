@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -127,6 +128,43 @@ EXTENSIONS = [
 _state_lock = asyncio.Lock()
 _bg_mint_task: Optional[asyncio.Task] = None
 _cached_state: Optional[Dict[str, Any]] = None
+
+# 最近一次请求上下文里的渠道代理（warp_only）信息，供无 provider 的后台任务复用。
+_last_proxy: Dict[str, Any] = {"url": None, "require": False}
+
+
+def _refresh_proxy_state(provider: Optional[Dict[str, Any]]) -> None:
+    """Record whether this channel forces a proxy, so background minting stays on WARP."""
+    if not isinstance(provider, dict):
+        return
+    try:
+        from core.utils import is_warp_only_provider, resolve_provider_proxy
+        if is_warp_only_provider(provider):
+            _last_proxy.update(url=resolve_provider_proxy(provider), require=True)
+        else:
+            _last_proxy.update(url=None, require=False)
+    except Exception as exc:
+        logger.warning(f"[{PLUGIN_NAME}] proxy resolve failed: {exc}")
+
+
+def _proxy_ctx(provider: Optional[Dict[str, Any]]):
+    """Route the plugin's own Kaggle calls through the channel's warp_only proxy.
+
+    Fail-closed: with warp_only enabled and no valid proxy, proxy_context raises
+    instead of letting mint/quota traffic leave with the host's real IP.
+    """
+    url: Any = None
+    require = False
+    if isinstance(provider, dict):
+        from core.utils import is_warp_only_provider, resolve_provider_proxy
+        if is_warp_only_provider(provider):
+            url, require = resolve_provider_proxy(provider), True
+    if not require and _last_proxy.get("require"):
+        url, require = _last_proxy.get("url"), True
+    if require:
+        from core.http import proxy_context
+        return proxy_context(url, require_proxy=True)
+    return nullcontext()
 
 
 def parse_options(raw_options: Any) -> Dict[str, Any]:
@@ -334,7 +372,7 @@ async def _kaggle_rpc(client: httpx.AsyncClient, kgat_token: str, service: str, 
         return 0, str(exc)
 
 
-async def mint_verifier_token_async(kgat_token: str, slug: str = "sanity-bench-check") -> Tuple[Optional[str], float, Any]:
+async def mint_verifier_token_async(kgat_token: str, slug: str = "sanity-bench-check", provider: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], float, Any]:
     """Mint a 12-hour kaggleweb:... verifier token from a KGAT_ mother key."""
     extract_code = """import os, json
 import kaggle_benchmarks as kbench
@@ -354,88 +392,89 @@ def sanity_bench_check(llm) -> None:
     kbench.assertions.assert_true(True)
 sanity_bench_check.run(kbench.llm)
 """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        ok, rem_quota, raw_quota = await check_kaggle_quota(client, kgat_token)
-        if not ok:
-            return None, 0.0, raw_quota
+    with _proxy_ctx(provider):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            ok, rem_quota, raw_quota = await check_kaggle_quota(client, kgat_token)
+            if not ok:
+                return None, 0.0, raw_quota
 
-        st, resp = await _kaggle_rpc(
-            client,
-            kgat_token,
-            "benchmarks.BenchmarkTasksApiService",
-            "CreateBenchmarkTask",
-            {"slug": slug, "text": _make_notebook(extract_code)},
-        )
-        if st != 200:
-            logger.warning(f"[{PLUGIN_NAME}] CreateBenchmarkTask failed (HTTP {st}): {resp}")
-            return None, rem_quota, resp
-
-        verifier_token: Optional[str] = None
-        try:
-            for _ in range(45):
-                await asyncio.sleep(4.0)
-                _, gresp = await _kaggle_rpc(
-                    client,
-                    kgat_token,
-                    "benchmarks.BenchmarkTasksApiService",
-                    "GetBenchmarkTask",
-                    {"slug": {"taskSlug": slug}},
-                )
-                cstate = gresp.get("creationState", "") if isinstance(gresp, dict) else ""
-                if "COMPLETED" in cstate or "ERRORED" in cstate:
-                    break
-
-            _, rresp = await _kaggle_rpc(
-                client,
-                kgat_token,
-                "benchmarks.BenchmarkTasksApiService",
-                "ListBenchmarkTaskRuns",
-                {"taskSlug": {"taskSlug": slug}},
-            )
-            runs = rresp.get("runs", []) if isinstance(rresp, dict) else []
-            for run in runs:
-                rid = run.get("id")
-                _, logs = await _kaggle_rpc(
-                    client,
-                    kgat_token,
-                    "benchmarks.BenchmarkTasksApiService",
-                    "GetBenchmarkTaskRunLogs",
-                    {"runId": rid},
-                )
-                if isinstance(logs, list):
-                    stdout_text = "".join(
-                        x.get("data", "") for x in logs if isinstance(x, dict) and x.get("stream_name") == "stdout"
-                    )
-                else:
-                    stdout_text = str(logs)
-                if "VERIFIER_JSON_START:" in stdout_text:
-                    seg = stdout_text.split("VERIFIER_JSON_START:", 1)[1].split(":VERIFIER_JSON_END", 1)[0]
-                    arr = json.loads(seg)
-                    if isinstance(arr, list) and len(arr) >= 2:
-                        item = arr[1]
-                        tok = (
-                            item["apiKey"]
-                            if isinstance(item, dict) and "apiKey" in item
-                            else (item["key"] if isinstance(item, dict) and "key" in item else item)
-                        )
-                        if isinstance(tok, dict):
-                            tok = next(
-                                (v for v in tok.values() if isinstance(v, str) and v.startswith("kaggleweb:")),
-                                str(tok),
-                            )
-                        if isinstance(tok, str) and tok.startswith("kaggleweb:"):
-                            verifier_token = tok
-                            break
-        finally:
-            await _kaggle_rpc(
+            st, resp = await _kaggle_rpc(
                 client,
                 kgat_token,
                 "benchmarks.BenchmarkTasksApiService",
                 "CreateBenchmarkTask",
-                {"slug": slug, "text": _make_notebook(clean_code)},
+                {"slug": slug, "text": _make_notebook(extract_code)},
             )
+            if st != 200:
+                logger.warning(f"[{PLUGIN_NAME}] CreateBenchmarkTask failed (HTTP {st}): {resp}")
+                return None, rem_quota, resp
 
-        return verifier_token, rem_quota, raw_quota
+            verifier_token: Optional[str] = None
+            try:
+                for _ in range(45):
+                    await asyncio.sleep(4.0)
+                    _, gresp = await _kaggle_rpc(
+                        client,
+                        kgat_token,
+                        "benchmarks.BenchmarkTasksApiService",
+                        "GetBenchmarkTask",
+                        {"slug": {"taskSlug": slug}},
+                    )
+                    cstate = gresp.get("creationState", "") if isinstance(gresp, dict) else ""
+                    if "COMPLETED" in cstate or "ERRORED" in cstate:
+                        break
+
+                _, rresp = await _kaggle_rpc(
+                    client,
+                    kgat_token,
+                    "benchmarks.BenchmarkTasksApiService",
+                    "ListBenchmarkTaskRuns",
+                    {"taskSlug": {"taskSlug": slug}},
+                )
+                runs = rresp.get("runs", []) if isinstance(rresp, dict) else []
+                for run in runs:
+                    rid = run.get("id")
+                    _, logs = await _kaggle_rpc(
+                        client,
+                        kgat_token,
+                        "benchmarks.BenchmarkTasksApiService",
+                        "GetBenchmarkTaskRunLogs",
+                        {"runId": rid},
+                    )
+                    if isinstance(logs, list):
+                        stdout_text = "".join(
+                            x.get("data", "") for x in logs if isinstance(x, dict) and x.get("stream_name") == "stdout"
+                        )
+                    else:
+                        stdout_text = str(logs)
+                    if "VERIFIER_JSON_START:" in stdout_text:
+                        seg = stdout_text.split("VERIFIER_JSON_START:", 1)[1].split(":VERIFIER_JSON_END", 1)[0]
+                        arr = json.loads(seg)
+                        if isinstance(arr, list) and len(arr) >= 2:
+                            item = arr[1]
+                            tok = (
+                                item["apiKey"]
+                                if isinstance(item, dict) and "apiKey" in item
+                                else (item["key"] if isinstance(item, dict) and "key" in item else item)
+                            )
+                            if isinstance(tok, dict):
+                                tok = next(
+                                    (v for v in tok.values() if isinstance(v, str) and v.startswith("kaggleweb:")),
+                                    str(tok),
+                                )
+                            if isinstance(tok, str) and tok.startswith("kaggleweb:"):
+                                verifier_token = tok
+                                break
+            finally:
+                await _kaggle_rpc(
+                    client,
+                    kgat_token,
+                    "benchmarks.BenchmarkTasksApiService",
+                    "CreateBenchmarkTask",
+                    {"slug": slug, "text": _make_notebook(clean_code)},
+                )
+
+            return verifier_token, rem_quota, raw_quota
 
 
 def _slot_valid(slot: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
@@ -501,35 +540,42 @@ async def _mint_from_candidates(
     state: Dict[str, Any],
     opts: Dict[str, Any],
     exclude_kgat: str = "",
+    provider: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     candidates = _candidate_order(kgat_keys, state, opts, exclude_kgat=exclude_kgat)
     min_quota = float(opts.get("min_quota") or 1.5)
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for idx, kgat in candidates:
-            ok, rem, raw_q = await check_kaggle_quota(client, kgat)
-            if not ok or rem < min_quota:
-                if ok and rem < min_quota:
-                    state.setdefault("exhausted_kgats", {})[kgat] = time.time()
-                continue
-            logger.info(f"[{PLUGIN_NAME}] minting 12h verifier token from mother key #{idx} ({kgat[:12]}..., quota=${rem:.2f})")
-            tok, rem2, _ = await mint_verifier_token_async(kgat)
-            if tok:
-                now = time.time()
-                state["cursor_index"] = idx
-                return {
-                    "verifier_token": tok,
-                    "kgat": kgat,
-                    "index": idx,
-                    "minted_at": now,
-                    "expires_at": now + TOKEN_TTL_SECONDS,
-                    "quota_remaining": rem2,
-                    "quota_raw": raw_q,
-                    "source": "minted",
-                }
+    with _proxy_ctx(provider):
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for idx, kgat in candidates:
+                ok, rem, raw_q = await check_kaggle_quota(client, kgat)
+                if not ok or rem < min_quota:
+                    if ok and rem < min_quota:
+                        state.setdefault("exhausted_kgats", {})[kgat] = time.time()
+                    continue
+                logger.info(f"[{PLUGIN_NAME}] minting 12h verifier token from mother key #{idx} ({kgat[:12]}..., quota=${rem:.2f})")
+                tok, rem2, _ = await mint_verifier_token_async(kgat, provider=provider)
+                if tok:
+                    now = time.time()
+                    state["cursor_index"] = idx
+                    return {
+                        "verifier_token": tok,
+                        "kgat": kgat,
+                        "index": idx,
+                        "minted_at": now,
+                        "expires_at": now + TOKEN_TTL_SECONDS,
+                        "quota_remaining": rem2,
+                        "quota_raw": raw_q,
+                        "source": "minted",
+                    }
     return None
 
 
-async def _ensure_pool_Task(kgat_keys: List[str], seed_tokens: List[str], opts: Dict[str, Any]) -> None:
+async def _ensure_pool_Task(
+    kgat_keys: List[str],
+    seed_tokens: List[str],
+    opts: Dict[str, Any],
+    provider: Optional[Dict[str, Any]] = None,
+) -> None:
     """Background task to keep active + standby populated and renewed."""
     async with _state_lock:
         state = _load_state(kgat_keys, seed_tokens)
@@ -548,7 +594,7 @@ async def _ensure_pool_Task(kgat_keys: List[str], seed_tokens: List[str], opts: 
 
         # 2. If active is still invalid, mint one now
         if not _slot_valid(active, now):
-            minted = await _mint_from_candidates(kgat_keys, state, opts)
+            minted = await _mint_from_candidates(kgat_keys, state, opts, provider=provider)
             if minted:
                 state["active"] = minted
                 active = minted
@@ -559,11 +605,12 @@ async def _ensure_pool_Task(kgat_keys: List[str], seed_tokens: List[str], opts: 
             act_kgat = str(active.get("kgat") or "")
             renewed = None
             if act_kgat.startswith("KGAT_"):
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    ok, rem, raw_q = await check_kaggle_quota(client, act_kgat)
+                with _proxy_ctx(provider):
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        ok, rem, raw_q = await check_kaggle_quota(client, act_kgat)
                 if ok and rem >= float(opts.get("min_quota") or 1.5):
                     logger.info(f"[{PLUGIN_NAME}] same-key renewing active #{active.get('index')} ({act_kgat[:12]}...)")
-                    tok, rem2, _ = await mint_verifier_token_async(act_kgat)
+                    tok, rem2, _ = await mint_verifier_token_async(act_kgat, provider=provider)
                     if tok:
                         renewed = {
                             **active,
@@ -589,19 +636,24 @@ async def _ensure_pool_Task(kgat_keys: List[str], seed_tokens: List[str], opts: 
         # 4. Ensure standby is valid and from a different mother key
         if not _slot_valid(standby, now):
             exclude = str((state.get("active") or {}).get("kgat") or "")
-            minted_sb = await _mint_from_candidates(kgat_keys, state, opts, exclude_kgat=exclude)
+            minted_sb = await _mint_from_candidates(kgat_keys, state, opts, exclude_kgat=exclude, provider=provider)
             if minted_sb:
                 state["standby"] = minted_sb
                 _save_state(state)
 
 
-def _trigger_bg_maintenance(kgat_keys: List[str], seed_tokens: List[str], opts: Dict[str, Any]) -> None:
+def _trigger_bg_maintenance(
+    kgat_keys: List[str],
+    seed_tokens: List[str],
+    opts: Dict[str, Any],
+    provider: Optional[Dict[str, Any]] = None,
+) -> None:
     global _bg_mint_task
     if _bg_mint_task is not None and not _bg_mint_task.done():
         return
     try:
         loop = asyncio.get_running_loop()
-        _bg_mint_task = loop.create_task(_ensure_pool_Task(kgat_keys, seed_tokens, opts))
+        _bg_mint_task = loop.create_task(_ensure_pool_Task(kgat_keys, seed_tokens, opts, provider=provider))
     except RuntimeError:
         pass
 
@@ -678,6 +730,7 @@ async def kaggle_verifier_pool_request_interceptor(
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     opts = parse_options(get_plugin_options(PLUGIN_NAME, provider))
     kgat_keys, seed_tokens = _load_keys_source(provider)
+    _refresh_proxy_state(provider)
     state = _load_state(kgat_keys, seed_tokens)
 
     # Handle manual rotate_nonce change or pinned mother key mismatch
@@ -700,16 +753,16 @@ async def kaggle_verifier_pool_request_interceptor(
             _save_state(state)
         else:
             # Synchronous mint for newly pinned key if user explicitly pinned it
-            await _ensure_pool_Task(kgat_keys, seed_tokens, opts)
+            await _ensure_pool_Task(kgat_keys, seed_tokens, opts, provider=provider)
             state = _load_state(kgat_keys, seed_tokens)
             active = state.get("active")
 
     if not _slot_valid(active):
-        await _ensure_pool_Task(kgat_keys, seed_tokens, opts)
+        await _ensure_pool_Task(kgat_keys, seed_tokens, opts, provider=provider)
         state = _load_state(kgat_keys, seed_tokens)
         active = state.get("active")
     elif _slot_needs_renewal(active) or not _slot_valid(state.get("standby")):
-        _trigger_bg_maintenance(kgat_keys, seed_tokens, opts)
+        _trigger_bg_maintenance(kgat_keys, seed_tokens, opts, provider=provider)
 
     verifier_token = str((active or {}).get("verifier_token") or "").strip()
     if not verifier_token and isinstance(api_key, str) and api_key.startswith("kaggleweb:"):
@@ -797,15 +850,16 @@ async def kaggle_verifier_pool_balance_enricher(
 
     # Refresh active mother key quota in real time when checking balance
     if isinstance(active, dict) and str(active.get("kgat") or "").startswith("KGAT_"):
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            ok, rem, raw_q = await check_kaggle_quota(client, active["kgat"])
-            if ok:
-                active["quota_remaining"] = rem
-                active["quota_raw"] = raw_q
-                _save_state(state)
+        with _proxy_ctx(provider):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                ok, rem, raw_q = await check_kaggle_quota(client, active["kgat"])
+        if ok:
+            active["quota_remaining"] = rem
+            active["quota_raw"] = raw_q
+            _save_state(state)
 
     if not _slot_valid(active) or not _slot_valid(state.get("standby")):
-        _trigger_bg_maintenance(kgat_keys, seed_tokens, opts)
+        _trigger_bg_maintenance(kgat_keys, seed_tokens, opts, provider=provider)
 
     act_info = _format_slot_summary(state.get("active"))
     sb_info = _format_slot_summary(state.get("standby"))

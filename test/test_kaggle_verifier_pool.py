@@ -156,6 +156,36 @@ def test_request_interceptor_injects_per_protocol_and_caps(isolated_state):
     assert payload["max_completion_tokens"] == 8192
 
 
+def test_proxy_ctx_routes_through_warp_and_fails_closed(monkeypatch):
+    import contextlib
+    from core import http as core_http
+
+    monkeypatch.setattr(pool, "_last_proxy", {"url": None, "require": False})
+    seen = {}
+
+    @contextlib.contextmanager
+    def fake_proxy_context(proxy_url=None, *, require_proxy=False):
+        seen["url"] = proxy_url
+        seen["require"] = require_proxy
+        yield
+
+    monkeypatch.setattr(core_http, "proxy_context", fake_proxy_context)
+
+    provider = {"preferences": {"enabled_plugins": ["warp_only"]}}
+    with pool._proxy_ctx(provider):
+        pass
+    assert seen["require"] is True and str(seen["url"]).startswith("socks5://")
+
+    seen.clear()
+    with pool._proxy_ctx({"preferences": {"enabled_plugins": ["kaggle_verifier_pool"]}}):
+        pass
+    assert seen == {}
+
+    with pytest.raises(ValueError):
+        with pool._proxy_ctx({"preferences": {"enabled_plugins": ["warp_only:ftp://127.0.0.1:1"]}}):
+            pass
+
+
 def test_rotate_nonce_promotes_standby(isolated_state, monkeypatch):
     # 隔离后台续签协程，避免测试触网
     monkeypatch.setattr(pool, "_trigger_bg_maintenance", lambda *a, **k: None)
