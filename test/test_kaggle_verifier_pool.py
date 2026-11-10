@@ -38,21 +38,21 @@ def test_parse_options_string_and_dict():
 
 
 def test_cap_max_tokens_openai_and_gemini():
-    payload = {"messages": [], "max_tokens": 64000}
-    pool._cap_max_tokens(payload, 8192)
-    assert payload["max_tokens"] == 8192
+    payload = {"messages": [], "max_tokens": 128000}
+    pool._cap_max_tokens(payload, 65536)
+    assert payload["max_tokens"] == 65536
 
     payload = {"messages": []}
-    pool._cap_max_tokens(payload, 8192)
-    assert payload["max_tokens"] == 4096
+    pool._cap_max_tokens(payload, 65536)
+    assert payload["max_tokens"] == 65536
 
     payload = {"contents": [], "generationConfig": {"maxOutputTokens": 99999}}
-    pool._cap_max_tokens(payload, 4096)
-    assert payload["generationConfig"]["maxOutputTokens"] == 4096
+    pool._cap_max_tokens(payload, 65536)
+    assert payload["generationConfig"]["maxOutputTokens"] == 65536
 
     payload = {"contents": []}
-    pool._cap_max_tokens(payload, 4096)
-    assert payload["generationConfig"]["maxOutputTokens"] == 4096
+    pool._cap_max_tokens(payload, 65536)
+    assert payload["generationConfig"]["maxOutputTokens"] == 65536
 
 
 def test_strip_url_key_param():
@@ -163,15 +163,15 @@ def test_request_interceptor_injects_per_protocol_and_caps(isolated_state):
     ))
     assert headers["x-goog-api-key"] == "kaggleweb:ACTIVE_TOKEN"
     assert "Authorization" not in headers and "key=" not in url
-    assert payload["generationConfig"]["maxOutputTokens"] == 8192
+    assert payload["generationConfig"]["maxOutputTokens"] == 65536
 
     # Anthropic 原生：x-api-key
     url, headers, payload = asyncio.run(run(
         "https://mp-staging.kaggle.net/models/anthropic/v1/messages",
-        "claude", {}, {"messages": [], "max_tokens": 64000},
+        "claude", {}, {"messages": [], "max_tokens": 128000},
     ))
     assert headers["x-api-key"] == "kaggleweb:ACTIVE_TOKEN"
-    assert payload["max_tokens"] == 8192
+    assert payload["max_tokens"] == 65536
 
     # OpenAI 兼容：Authorization Bearer
     url, headers, payload = asyncio.run(run(
@@ -179,7 +179,7 @@ def test_request_interceptor_injects_per_protocol_and_caps(isolated_state):
         "openai", {}, {"messages": [], "max_completion_tokens": 999999},
     ))
     assert headers["Authorization"] == "Bearer kaggleweb:ACTIVE_TOKEN"
-    assert payload["max_completion_tokens"] == 8192
+    assert payload["max_completion_tokens"] == 65536
 
 
 def test_proxy_ctx_routes_through_warp_and_fails_closed(monkeypatch):

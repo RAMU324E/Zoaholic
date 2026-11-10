@@ -78,9 +78,9 @@ PARAMS_SCHEMA = [
         "label": "max_tokens 安全封顶 (防预冻结 403)",
         "type": "number",
         "min": 512,
-        "max": 32768,
-        "default": 8192,
-        "hint": "Kaggle 网关按 max_tokens 预冻结余额，建议保持 4096 或 8192",
+        "max": 65536,
+        "default": 65536,
+        "hint": "Kaggle 网关实测支持 65536；若遇单卡余额不足预冻结 403 可调低为 16384 或 8192",
         "serialize": "key_value",
     },
     {
@@ -171,7 +171,7 @@ def parse_options(raw_options: Any) -> Dict[str, Any]:
     cfg = {
         "pin_key": "",
         "pick_order": "reverse",
-        "max_tokens_cap": 8192,
+        "max_tokens_cap": 65536,
         "min_quota": 1.5,
         "rotate_nonce": "0",
     }
@@ -190,7 +190,7 @@ def parse_options(raw_options: Any) -> Dict[str, Any]:
     try:
         cfg["max_tokens_cap"] = max(256, int(float(cfg["max_tokens_cap"])))
     except Exception:
-        cfg["max_tokens_cap"] = 8192
+        cfg["max_tokens_cap"] = 65536
     try:
         cfg["min_quota"] = max(0.1, float(cfg["min_quota"]))
     except Exception:
@@ -297,6 +297,65 @@ def _save_state(state: Dict[str, Any]) -> None:
         tmp.replace(p)
     except Exception as exc:
         logger.warning(f"[{PLUGIN_NAME}] failed saving state: {exc}")
+    _sync_state_to_runtime_provider(state)
+
+
+def _format_key_label(prefix: str, slot: Dict[str, Any]) -> str:
+    idx = slot.get("index", "?")
+    usd = float(slot.get("quota_remaining") or 0.0)
+    rem_min = max(0, int((float(slot.get("expires_at") or 0) - time.time()) / 60))
+    kgat = str(slot.get("kgat") or "")
+    tail = kgat[-4:] if len(kgat) >= 4 else kgat
+    return f"{prefix}#{idx}(..{tail}) · ${usd:.2f} · {rem_min}m"
+
+
+def _build_provider_api_entries(state: Dict[str, Any]) -> Tuple[List[str], Dict[str, str]]:
+    """Build runtime api list + _api_labels so the admin UI directly shows active & standby tokens."""
+    api_list: List[str] = []
+    labels: Dict[str, str] = {}
+    act = state.get("active")
+    sb = state.get("standby")
+    if isinstance(act, dict) and act.get("verifier_token"):
+        tok = str(act["verifier_token"]).strip()
+        api_list.append(tok)
+        labels[tok] = _format_key_label("主卡", act)
+    if isinstance(sb, dict) and sb.get("verifier_token"):
+        tok = str(sb["verifier_token"]).strip()
+        if tok not in labels:
+            api_list.append(f"!{tok}")
+            labels[tok] = _format_key_label("热备", sb)
+    return api_list, labels
+
+
+def _sync_state_to_runtime_provider(state: Dict[str, Any]) -> None:
+    """Keep the channel's API Keys list in sync with active/standby verifier tokens for easy viewing in UI."""
+    try:
+        api_list, labels = _build_provider_api_entries(state)
+        if not api_list:
+            return
+        from core.plugins.interceptors import parse_enabled_plugins
+        from main import get_app
+        app = get_app()
+        cfg = getattr(app.state, "config", None) or {}
+        changed = False
+        for p in cfg.get("providers") or []:
+            if not isinstance(p, dict):
+                continue
+            ep = ((p.get("preferences") or {}).get("enabled_plugins")) or []
+            if PLUGIN_NAME in parse_enabled_plugins(ep):
+                if p.get("api") != api_list or p.get("_api_labels") != labels:
+                    p["api"] = list(api_list)
+                    p["_api_labels"] = dict(labels)
+                    changed = True
+        if changed:
+            try:
+                loop = asyncio.get_running_loop()
+                from core.config.db_store import save_config_to_db
+                loop.create_task(save_config_to_db(cfg))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _extract_quota_remaining(quota_obj: Any) -> float:
@@ -716,7 +775,7 @@ def _cap_max_tokens(payload: Dict[str, Any], cap: int) -> None:
         except Exception:
             gen_cfg["maxOutputTokens"] = cap
     elif "messages" in payload and "max_tokens" not in payload and "max_completion_tokens" not in payload:
-        payload["max_tokens"] = min(4096, cap)
+        payload["max_tokens"] = cap
 
 
 async def kaggle_verifier_pool_request_interceptor(
@@ -888,6 +947,56 @@ async def kaggle_verifier_pool_balance_enricher(
     return enriched
 
 
+KAGGLE_POOL_QUOTA_DISPLAY = """
+export default function render(ctx) {
+    const { el, data, context } = ctx || {};
+    if (!el) return;
+    const mode = context?.mode || 'row';
+    const pool = data?.kaggle_pool || context?.balance?.kaggle_pool || data?.raw || {};
+    const act = pool?.active;
+    const sb = pool?.standby;
+    const tier = data?.tier || context?.balance?.tier || '';
+    if (mode === 'rack') {
+        el.textContent = act ? `#${act.index ?? '?'} $${(act.quota_remaining_usd ?? 0).toFixed(0)}` : (tier || '');
+        el.className = 'text-[10px] font-semibold font-mono text-emerald-500';
+        return;
+    }
+    el.innerHTML = '';
+    el.className = 'flex items-center gap-1 flex-wrap';
+    const badge = document.createElement('span');
+    const usd = act?.quota_remaining_usd ?? data?.available ?? 0;
+    const mins = act?.expires_in_minutes ?? 0;
+    badge.textContent = act ? `母卡#${act.index} · $${Number(usd).toFixed(2)} · ${mins}m` : (tier || '未就绪');
+    badge.className = 'text-[10px] font-semibold font-mono px-1.5 py-0.5 rounded text-emerald-500 bg-emerald-500/15';
+    if (act?.verifier_token) {
+        badge.title = `Active(#${act.index} ${act.kgat_masked || ''}): ${act.verifier_token}`;
+    }
+    el.appendChild(badge);
+    const mkBtn = (label, slot, cls) => {
+        if (!slot?.verifier_token) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const shortTok = String(slot.verifier_token).slice(0, 18) + '...';
+        btn.textContent = `${label}#${slot.index}:${shortTok}`;
+        btn.title = `点击复制完整 Token:\\n${slot.verifier_token}`;
+        btn.className = `text-[10px] font-mono px-1.5 py-0.5 rounded border cursor-pointer ${cls}`;
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            if (navigator?.clipboard?.writeText) {
+                navigator.clipboard.writeText(slot.verifier_token);
+                const old = btn.textContent;
+                btn.textContent = `✓ 已复制 #${slot.index}`;
+                setTimeout(() => { btn.textContent = old; }, 1500);
+            }
+        };
+        el.appendChild(btn);
+    };
+    mkBtn('主', act, 'border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20');
+    mkBtn('备', sb, 'border-purple-500/40 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20');
+}
+"""
+
+
 def setup(manager):
     register_request_interceptor(
         interceptor_id=_REQ_ID,
@@ -913,9 +1022,28 @@ def setup(manager):
         overwrite=True,
         metadata={"description": "Kaggle 裁判卡额度与当前临时 Token 查看"},
     )
+    try:
+        from core.ui_slots.registry import register_ui_slot
+        register_ui_slot(
+            slot_id=f"{PLUGIN_NAME}.quota_display",
+            slot="quota_display",
+            script=KAGGLE_POOL_QUOTA_DISPLAY,
+            source=PLUGIN_NAME,
+            priority=80,
+            engines=["gemini", "openai", "claude", "anthropic", "openai-responses"],
+            auth_types=["api_key"],
+            enabled_plugin=PLUGIN_NAME,
+        )
+    except Exception as exc:
+        logger.warning(f"[{PLUGIN_NAME}] register_ui_slot failed: {exc}")
 
 
 def teardown(manager):
     unregister_request_interceptor(_REQ_ID)
     unregister_response_interceptor(_RESP_ID)
     unregister_balance_enricher(_BAL_ID)
+    try:
+        from core.ui_slots.registry import unregister_ui_slot
+        unregister_ui_slot(f"{PLUGIN_NAME}.quota_display")
+    except Exception:
+        pass
