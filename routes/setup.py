@@ -11,14 +11,20 @@ import os
 import secrets
 from typing import Optional
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.auth import authenticate_admin_api_key_token, extract_token
 from core.initialization import ensure_initialized, get_admin_user, refresh_initialization
 from core.log_config import logger
 from core.security import hash_password, verify_password
-from routes.deps import get_app
+from routes.auth import (
+    _check_login_rate_limit,
+    _extract_login_client_ip,
+    _login_failures_by_ip,
+    _record_login_failure,
+)
+from routes.deps import get_app, rate_limit_dependency
 from utils import update_config, load_config_from_db
 from db import DISABLE_DATABASE, async_session_scope
 
@@ -177,8 +183,12 @@ async def _setup_init(request: Request, payload: SetupInitRequest):
         client_ip = StatsMiddleware._get_client_ip(request.scope, request.scope.get("headers", []))
         authenticate_admin_api_key_token(app, token, client_ip, require_explicit_role=True)
     elif admin_user is not None:
+        client_ip = _extract_login_client_ip(request)
+        _check_login_rate_limit(client_ip)
         if admin_user.username != payload.username.strip() or not verify_password(payload.password, admin_user.password_hash):
+            _record_login_failure(client_ip)
             raise HTTPException(status_code=403, detail="Existing administrator credentials are required")
+        _login_failures_by_ip.pop(client_ip, None)
 
     if admin_user is None:
         await _create_admin_user(payload.username.strip(), payload.password, secrets.token_urlsafe(48))
@@ -290,9 +300,12 @@ async def _setup_init(request: Request, payload: SetupInitRequest):
     return SetupInitResponse(admin_api_key=admin_api_key)
 
 
-@router.post("/login", response_model=SetupLoginResponse)
-async def setup_login(payload: SetupLoginRequest = Body(...)):
+@router.post("/login", response_model=SetupLoginResponse, dependencies=[Depends(rate_limit_dependency)])
+async def setup_login(request: Request = None, payload: SetupLoginRequest = Body(...)):
     """使用管理员账号密码登录，返回管理员 API Key（兼容现有前端基于 API Key 的鉴权）。"""
+
+    client_ip = _extract_login_client_ip(request)
+    _check_login_rate_limit(client_ip)
 
     await ensure_initialized(get_app())
     admin_user = await _get_admin_user()
@@ -300,10 +313,14 @@ async def setup_login(payload: SetupLoginRequest = Body(...)):
         raise HTTPException(status_code=404, detail="Admin user not initialized")
 
     if admin_user.username != payload.username:
+        _record_login_failure(client_ip)
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
     if not verify_password(payload.password, admin_user.password_hash):
+        _record_login_failure(client_ip)
         raise HTTPException(status_code=403, detail="Invalid username or password")
+
+    _login_failures_by_ip.pop(client_ip, None)
 
     # 从当前配置中取管理员 key（配置权威来自 api.yaml/app.state.config）
     app = get_app()

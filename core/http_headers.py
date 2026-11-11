@@ -1,5 +1,6 @@
 """HTTP header 合并与客户端 IP 提取。"""
 
+import os
 from typing import Any, Optional
 
 
@@ -66,11 +67,12 @@ def apply_custom_headers(headers: dict, custom_headers: Optional[dict]) -> None:
 
 
 def extract_client_ip(headers: Any, fallback_host: str | None = None) -> str:
-    """统一从请求头提取真实客户端 IP（CF-Connecting-IP > X-Forwarded-For 最右跳 > X-Real-IP > fallback）。"""
+    """统一从请求头提取真实客户端 IP（默认 X-Forwarded-For 最右跳 > X-Real-IP > fallback；仅显式开启 TRUST_CF_CONNECTING_IP 时优先 CF-Connecting-IP）。"""
     if headers is not None:
-        cf_ip = (headers.get("cf-connecting-ip") or "").strip()
-        if cf_ip:
-            return cf_ip
+        if os.getenv("TRUST_CF_CONNECTING_IP", "").strip().lower() in ("1", "true", "yes"):
+            cf_ip = (headers.get("cf-connecting-ip") or "").strip()
+            if cf_ip:
+                return cf_ip
         forwarded_for = headers.get("x-forwarded-for")
         if forwarded_for:
             hops = [part.strip() for part in str(forwarded_for).split(",") if part.strip()]

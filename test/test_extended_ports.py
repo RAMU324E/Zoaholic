@@ -14,17 +14,18 @@ from core.file_utils import is_link_or_reparse
 from core.http_headers import extract_client_ip
 from core.ip_blacklist import extract_client_ip as compatibility_extract_ip
 from core.middleware import StatsMiddleware
-from routes import auth as login_routes, plugins, stats
+from routes import auth as login_routes, plugins, setup as setup_routes, stats
 from core.dialects import openai_responses_ws as ws
 
 
 @pytest.mark.parametrize("headers,expected", [
-    ({"CF-Connecting-IP": " 203.0.113.7 ", "X-Forwarded-For": "198.51.100.1, 198.51.100.2"}, "203.0.113.7"),
+    ({"CF-Connecting-IP": " 203.0.113.7 ", "X-Forwarded-For": "198.51.100.1, 198.51.100.2"}, "198.51.100.2"),
     ({"CF-Connecting-IP": " ", "X-Forwarded-For": "198.51.100.1, 198.51.100.2, "}, "198.51.100.2"),
     ({"X-Forwarded-For": ", ", "X-Real-IP": " 198.51.100.3 "}, "198.51.100.3"),
     ({}, "127.0.0.1"),
 ])
-def test_cf_priority_and_all_shared_callers(headers, expected):
+def test_cf_priority_and_all_shared_callers(headers, expected, monkeypatch):
+    monkeypatch.delenv("TRUST_CF_CONNECTING_IP", raising=False)
     values = Headers(headers)
     peer = SimpleNamespace(host="127.0.0.1")
     scope = {"client": (peer.host, 1234)}
@@ -37,11 +38,42 @@ def test_cf_priority_and_all_shared_callers(headers, expected):
     assert ws._get_client_ip(request) == expected
 
 
+def test_cf_header_trusted_only_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("TRUST_CF_CONNECTING_IP", "true")
+    values = Headers({"CF-Connecting-IP": " 203.0.113.7 ", "X-Forwarded-For": "198.51.100.2"})
+    assert extract_client_ip(values, "127.0.0.1") == "203.0.113.7"
+
+
 def test_login_dictionary_remains_bounded(monkeypatch):
     monkeypatch.setattr(login_routes, "_login_failures_by_ip", {})
     for index in range(4100):
         login_routes._record_login_failure(f"fake-client-{index}")
     assert len(login_routes._login_failures_by_ip) == 4096
+
+
+@pytest.mark.asyncio
+async def test_setup_login_enforces_shared_login_rate_limit(monkeypatch):
+    monkeypatch.setattr(login_routes, "_login_failures_by_ip", {})
+    monkeypatch.setattr(setup_routes, "ensure_initialized", AsyncMock())
+    monkeypatch.setattr(
+        setup_routes,
+        "_get_admin_user",
+        AsyncMock(return_value=SimpleNamespace(username="admin", password_hash="hashed")),
+    )
+    monkeypatch.setattr(setup_routes, "verify_password", lambda raw, hashed: False)
+    req = SimpleNamespace(
+        headers=Headers({"CF-Connecting-IP": "1.1.1.1", "X-Forwarded-For": "198.51.100.99"}),
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    body = setup_routes.SetupLoginRequest(username="admin", password="wrongpassword")
+    for _ in range(5):
+        with pytest.raises(HTTPException) as exc:
+            await setup_routes.setup_login(req, body)
+        assert exc.value.status_code == 403
+        req.headers = Headers({"CF-Connecting-IP": f"2.2.2.{_}", "X-Forwarded-For": "198.51.100.99"})
+    with pytest.raises(HTTPException) as exc:
+        await setup_routes.setup_login(req, body)
+    assert exc.value.status_code == 429
 
 
 @pytest.mark.asyncio
