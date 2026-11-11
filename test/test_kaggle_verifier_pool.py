@@ -251,3 +251,47 @@ def test_quota_error_promotes_standby_and_rewrites_status(isolated_state, monkey
     assert new_state["active"]["verifier_token"] == "kaggleweb:STANDBY_TOKEN"
     assert new_state["standby"] is None
     assert kgat_keys[0] in new_state["exhausted_kgats"]
+
+
+def test_mixed_490_pool_loading_and_quota_refill_cooldown(isolated_state):
+    keys_file = isolated_state / "no_keys.json"
+    keys_file.write_text(
+        json.dumps({
+            "kgat_bearer_tokens": [{"token": "KGAT_" + "a" * 32}],
+            "legacy_kaggle_json_accounts": [
+                {"username": "alice", "key": "1" * 32},
+                {"kaggle_json": {"username": "bob", "key": "2" * 32}},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    creds, _ = pool._load_keys_source({"api": ["charlie:" + "3" * 32]})
+    assert len(creds) == 4
+    assert creds[0] == "KAGGLE_BASIC:charlie:" + "3" * 32
+    assert creds[1] == "KGAT_" + "a" * 32
+    assert creds[2] == "KAGGLE_BASIC:alice:" + "1" * 32
+    assert pool._cred_auth_header(creds[0]).startswith("Basic ")
+    assert pool._cred_owner_slug(creds[0]) == "charlie"
+
+    # Kaggle 官方数组返回结构：daily + monthly + refillTime
+    raw_quota = [
+        {"hasRefillTime": True, "quotaUsed": 9.2, "totalQuotaAllowed": 10.0, "refillPeriod": "daily", "refillTime": "2099-01-01T00:00:00.1234567Z"},
+        {"hasRefillTime": True, "quotaUsed": 15.0, "totalQuotaAllowed": 100.0, "refillPeriod": "monthly", "refillTime": "2099-02-01T00:00:00Z"},
+    ]
+    details = pool._parse_quota_details(raw_quota)
+    assert round(details["remaining"], 2) == 0.80
+    assert details["refill_until"] > time.time() + 86400
+
+    state = {"exhausted_kgats": {}, "invalid_keys": {}}
+    pool._mark_cooldown(state, creds[1], reason="low_quota", until=details["refill_until"])
+    pool._mark_invalid(state, creds[2], reason="HTTP 401")
+    counts = pool._pool_counts(creds, state)
+    assert counts == {
+        "total": 4,
+        "available": 2,
+        "cooling": 1,
+        "invalid": 1,
+        "kgat_count": 1,
+        "legacy_json_count": 3,
+    }
+
