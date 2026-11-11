@@ -26,7 +26,7 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 def test_parse_options_string_and_dict():
-    assert pool.parse_options(None)["pick_order"] == "reverse"
+    assert pool.parse_options(None)["pick_order"] == "random"
     cfg = pool.parse_options("pin_key=48,max_tokens_cap=4096,min_quota=2.0,pick_order=forward")
     assert cfg["pin_key"] == "48"
     assert cfg["max_tokens_cap"] == 4096
@@ -102,7 +102,12 @@ def test_slot_validity_and_renewal_window():
 def test_candidate_order_reverse_exhausted_and_pin():
     keys = [f"KGAT_{i:032x}" for i in range(1, 49)]
     state = {"cursor_index": None, "exhausted_kgats": {}}
-    opts = pool.parse_options(None)
+    # 默认是 random 洗牌：包含全部 48 把且顺序被打乱
+    opts_rand = pool.parse_options(None)
+    order_rand = pool._candidate_order(keys, state, opts_rand)
+    assert len(order_rand) == 48 and {idx for idx, _ in order_rand} == set(range(1, 49))
+
+    opts = pool.parse_options("pick_order=reverse")
     order = pool._candidate_order(keys, state, opts)
     assert order[0][0] == 48 and order[-1][0] == 1
 

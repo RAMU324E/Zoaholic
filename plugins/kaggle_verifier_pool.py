@@ -27,6 +27,7 @@ import asyncio
 import base64
 import json
 import os
+import random
 import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -72,11 +73,12 @@ PARAMS_SCHEMA = [
     },
     {
         "key": "pick_order",
-        "label": "自动挑卡顺序 (多人共用建议倒序)",
+        "label": "自动挑卡顺序 (多人共用默认随机防撞)",
         "type": "select",
-        "default": "reverse",
+        "default": "random",
         "options": [
-            {"value": "reverse", "label": "倒序 (N → 1，防撞推荐)"},
+            {"value": "random", "label": "随机洗牌 (多人零配置防撞推荐)"},
+            {"value": "reverse", "label": "倒序 (N → 1)"},
             {"value": "forward", "label": "正序 (1 → N)"},
         ],
         "serialize": "key_value",
@@ -170,7 +172,7 @@ def _proxy_ctx(provider: Optional[Dict[str, Any]]):
 def parse_options(raw_options: Any) -> Dict[str, Any]:
     cfg = {
         "pin_key": "",
-        "pick_order": "reverse",
+        "pick_order": "random",
         "max_tokens_cap": 65536,
         "min_quota": 1.5,
         "rotate_nonce": "0",
@@ -196,7 +198,8 @@ def parse_options(raw_options: Any) -> Dict[str, Any]:
     except Exception:
         cfg["min_quota"] = 1.5
     cfg["pin_key"] = str(cfg.get("pin_key") or "").strip()
-    cfg["pick_order"] = "forward" if str(cfg.get("pick_order")).strip().lower() == "forward" else "reverse"
+    po = str(cfg.get("pick_order") or "random").strip().lower()
+    cfg["pick_order"] = po if po in ("random", "reverse", "forward") else "random"
     cfg["rotate_nonce"] = str(cfg.get("rotate_nonce") or "0").strip()
     return cfg
 
@@ -846,12 +849,22 @@ def _candidate_order(
     if pinned and pinned[1] != exclude_kgat:
         ordered.append(pinned)
 
-    # 优先使用 KGAT_ 令牌，再用 KAGGLE_BASIC 账号（两类都完整支持，但按索引顺序轮询）
-    indices = list(range(total, 0, -1)) if opts.get("pick_order") == "reverse" else list(range(1, total + 1))
-    cursor = state.get("cursor_index")
-    if isinstance(cursor, int) and cursor in indices:
-        pos = indices.index(cursor)
-        indices = indices[pos:] + indices[:pos]
+    order_mode = opts.get("pick_order") or "random"
+    if order_mode == "random":
+        indices = list(range(1, total + 1))
+        random.SystemRandom().shuffle(indices)
+    elif order_mode == "reverse":
+        indices = list(range(total, 0, -1))
+        cursor = state.get("cursor_index")
+        if isinstance(cursor, int) and cursor in indices:
+            pos = indices.index(cursor)
+            indices = indices[pos:] + indices[:pos]
+    else:
+        indices = list(range(1, total + 1))
+        cursor = state.get("cursor_index")
+        if isinstance(cursor, int) and cursor in indices:
+            pos = indices.index(cursor)
+            indices = indices[pos:] + indices[:pos]
 
     now = time.time()
     for idx in indices:
