@@ -17,8 +17,6 @@
 4. **号池容量与 Token 直观可见**：
    - 自动将当前 `active` / `standby` 的 `kaggleweb:...` Token 与号池统计同步到渠道 API Keys 列表；
    - 点击渠道“余额查询”即可在行内看到 **`池 490 (可用488/冷却2) · 主#490 $10.00 715m`** 及一键复制 `active` / `standby` Token 按钮。
-5. **与 `warp_only` 强制代理完美协同**：
-   - 插件自身的额度查询与 12h Token 签发全部复用渠道 `warp_only` 代理上下文（Fail-Closed），绝不泄露宿主机真实 IP。
 """
 
 from __future__ import annotations
@@ -150,6 +148,8 @@ def _refresh_proxy_state(provider: Optional[Dict[str, Any]]) -> None:
             _last_proxy.update(url=resolve_provider_proxy(provider), require=True)
         else:
             _last_proxy.update(url=None, require=False)
+    except ImportError:
+        _last_proxy.update(url=None, require=False)
     except Exception as exc:
         logger.warning(f"[{PLUGIN_NAME}] proxy resolve failed: {exc}")
 
@@ -157,10 +157,13 @@ def _refresh_proxy_state(provider: Optional[Dict[str, Any]]) -> None:
 def _proxy_ctx(provider: Optional[Dict[str, Any]]):
     url: Any = None
     require = False
-    if isinstance(provider, dict):
-        from core.utils import is_warp_only_provider, resolve_provider_proxy
-        if is_warp_only_provider(provider):
-            url, require = resolve_provider_proxy(provider), True
+    try:
+        if isinstance(provider, dict):
+            from core.utils import is_warp_only_provider, resolve_provider_proxy
+            if is_warp_only_provider(provider):
+                url, require = resolve_provider_proxy(provider), True
+    except ImportError:
+        pass
     if not require and _last_proxy.get("require"):
         url, require = _last_proxy.get("url"), True
     if require:
