@@ -50,9 +50,11 @@ def test_cap_max_tokens_openai_and_gemini():
     pool._cap_max_tokens(payload, 65536)
     assert payload["generationConfig"]["maxOutputTokens"] == 65536
 
-    payload = {"contents": []}
+    payload = {"contents": [], "systemInstruction": {"parts": [{"text": ""}]}}
     pool._cap_max_tokens(payload, 65536)
+    pool._sanitize_gemini_payload(payload)
     assert payload["generationConfig"]["maxOutputTokens"] == 65536
+    assert "systemInstruction" not in payload
 
 
 def test_strip_url_key_param():

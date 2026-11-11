@@ -1089,6 +1089,31 @@ def _cap_max_tokens(payload: Dict[str, Any], cap: int) -> None:
         payload["max_tokens"] = cap
 
 
+def _sanitize_gemini_payload(payload: Dict[str, Any]) -> None:
+    """Strip empty systemInstruction parts that cause Kaggle's Go protobuf gateway to return HTTP 400."""
+    if not isinstance(payload, dict):
+        return
+    for key in ("systemInstruction", "system_instruction"):
+        if key not in payload:
+            continue
+        si = payload.get(key)
+        if not isinstance(si, dict):
+            payload.pop(key, None)
+            continue
+        parts = si.get("parts")
+        if not isinstance(parts, list):
+            payload.pop(key, None)
+            continue
+        cleaned_parts = [
+            p for p in parts
+            if not (isinstance(p, dict) and set(p.keys()) <= {"text"} and not str(p.get("text") or "").strip())
+        ]
+        if cleaned_parts:
+            si["parts"] = cleaned_parts
+        else:
+            payload.pop(key, None)
+
+
 async def kaggle_verifier_pool_request_interceptor(
     request: Any,
     engine: str,
@@ -1154,6 +1179,7 @@ async def kaggle_verifier_pool_request_interceptor(
             headers["Authorization"] = f"Bearer {verifier_token}"
 
     _cap_max_tokens(payload, opts["max_tokens_cap"])
+    _sanitize_gemini_payload(payload)
     return url, headers, payload
 
 
@@ -1333,7 +1359,7 @@ def setup(manager):
     register_request_interceptor(
         interceptor_id=_REQ_ID,
         callback=kaggle_verifier_pool_request_interceptor,
-        priority=20,
+        priority=200,
         plugin_name=PLUGIN_NAME,
         overwrite=True,
         metadata={"description": "Kaggle 12h 裁判号池用1备1注入与 max_tokens 封顶"},
