@@ -170,6 +170,340 @@ def extract_tool_call_signature(tc) -> str | None:
     return None
 
 
+_GEMINI_UNSUPPORTED_SCHEMA_FIELDS = (
+    "additionalProperties",
+    "additionalItems",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "$schema",
+    "$id",
+    "$comment",
+    "$anchor",
+    "$dynamicRef",
+    "$dynamicAnchor",
+    "$vocabulary",
+    "$defs",
+    "definitions",
+    "defs",
+    "dependencies",
+    "dependentRequired",
+    "dependentSchemas",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "not",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minimum",
+    "maximum",
+    "multipleOf",
+    "patternProperties",
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+    "contains",
+    "minContains",
+    "maxContains",
+    "if",
+    "then",
+    "else",
+    "contentEncoding",
+    "contentMediaType",
+    "contentSchema",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+    "examples",
+    "strict",
+)
+
+
+def inline_schema_refs(parameters, extra_defs=None):
+    """展开 JSON Schema 中的 $ref/$defs/definitions，消除 Gemini Protobuf 不支持的 $ref 字段。"""
+    if not isinstance(parameters, dict):
+        return
+    defs = {}
+    for defs_key in ("$defs", "definitions", "defs"):
+        extracted = parameters.pop(defs_key, None)
+        if isinstance(extracted, dict):
+            defs.update(extracted)
+    if isinstance(extra_defs, dict):
+        for k, v in extra_defs.items():
+            defs.setdefault(k, v)
+
+    def _resolve(node, depth):
+        if isinstance(node, dict):
+            for defs_key in ("$defs", "definitions", "defs"):
+                nested_defs = node.pop(defs_key, None)
+                if isinstance(nested_defs, dict):
+                    for k, v in nested_defs.items():
+                        defs.setdefault(k, v)
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/"):
+                name = ref.rsplit("/", 1)[-1]
+                if depth >= 2 or name not in defs:
+                    node.pop("$ref", None)
+                    node.setdefault("type", "object")
+                    desc = node.get("description", "")
+                    node["description"] = f"{desc}\nSchema ref: {name}".strip()
+                else:
+                    merged = copy.deepcopy(defs[name])
+                    for k, v in node.items():
+                        if k != "$ref":
+                            merged[k] = v
+                    node.clear()
+                    node.update(merged)
+                    _resolve(node, depth + 1)
+                    return
+            for value in list(node.values()):
+                _resolve(value, depth)
+        elif isinstance(node, list):
+            for item in node:
+                _resolve(item, depth)
+
+    _resolve(parameters, 0)
+
+
+# 多类型联合拆成 anyOf 分支时，只属于某一类型的约束字段要跟随对应分支。
+_TYPE_SPECIFIC_SCHEMA_FIELDS = {
+    "array": ("items", "prefixItems", "minItems", "maxItems"),
+    "object": ("properties", "required", "minProperties", "maxProperties"),
+    "string": ("enum", "format"),
+    "number": ("minimum", "maximum"),
+    "integer": ("minimum", "maximum"),
+}
+
+
+def _is_typed_schema_branch(item) -> bool:
+    """判断 anyOf/oneOf 分支是否自带类型定义（而不是只有 required 一类的约束）。"""
+    if not isinstance(item, dict):
+        return False
+    return (
+        (item.get("type") is not None and item.get("type") != "null")
+        or any(k in item for k in ("properties", "items", "enum", "anyOf", "oneOf", "allOf"))
+    )
+
+
+def process_tool_parameters(data):
+    """递归清洗 JSON Schema 使其兼容 Google Gemini / Vertex AI OpenAPI 3.0 Protobuf Schema。"""
+    if not isinstance(data, dict):
+        return
+
+    # 0. 处理逻辑组合符 (anyOf / oneOf / allOf)
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in data:
+            logic_list = data.pop(key)
+            if isinstance(logic_list, list) and logic_list:
+                if any(
+                    isinstance(item, dict) and (item.get("type") == "null" or ("const" in item and item.get("const") is None))
+                    for item in logic_list
+                ):
+                    data["nullable"] = True
+                non_null_items = [
+                    item for item in logic_list
+                    if isinstance(item, dict) and item.get("type") != "null" and not ("const" in item and item.get("const") is None)
+                ]
+                # Case A: 所有非 null 分支均为 const / enum 字面量枚举（如 Zod/TypeBox 联合字面量）
+                if non_null_items and all(
+                    ("const" in item or isinstance(item.get("enum"), list))
+                    and "properties" not in item
+                    and "items" not in item
+                    for item in non_null_items
+                ):
+                    merged_enum = []
+                    for item in non_null_items:
+                        if "const" in item and item.get("const") is not None:
+                            s_val = str(item["const"])
+                            if s_val not in merged_enum:
+                                merged_enum.append(s_val)
+                        if isinstance(item.get("enum"), list):
+                            for val in item["enum"]:
+                                if val is None:
+                                    data["nullable"] = True
+                                else:
+                                    s_val = str(val)
+                                    if s_val not in merged_enum:
+                                        merged_enum.append(s_val)
+                    if merged_enum:
+                        data["enum"] = merged_enum
+                        data["type"] = "string"
+                # Case B: allOf 多对象属性合并
+                elif key == "allOf" and len(non_null_items) > 1 and any("properties" in item for item in non_null_items):
+                    merged_props = dict(data.get("properties") or {})
+                    merged_req = list(data.get("required") or [])
+                    for item in non_null_items:
+                        item_copy = copy.deepcopy(item)
+                        process_tool_parameters(item_copy)
+                        if isinstance(item_copy.get("properties"), dict):
+                            merged_props.update(item_copy["properties"])
+                        if isinstance(item_copy.get("required"), list):
+                            for r_key in item_copy["required"]:
+                                if r_key not in merged_req:
+                                    merged_req.append(r_key)
+                        for k, v in item_copy.items():
+                            if k not in ("properties", "required") and k not in data:
+                                data[k] = v
+                    if merged_props:
+                        data["properties"] = merged_props
+                        data.setdefault("type", "object")
+                    if merged_req:
+                        data["required"] = merged_req
+                # Case C: 多个自带类型的 anyOf / oneOf 分支，保留为 Gemini Schema 原生支持的 anyOf，
+                #   避免只取第一个分支导致参数类型被改变（如 string | number 变成 string）。
+                elif (
+                    key in ("anyOf", "oneOf")
+                    and len(non_null_items) > 1
+                    and not any(k in data for k in ("type", "properties", "items"))
+                    and all(_is_typed_schema_branch(item) for item in non_null_items)
+                ):
+                    branches = []
+                    for item in non_null_items:
+                        branch = copy.deepcopy(item)
+                        process_tool_parameters(branch)
+                        branches.append(branch)
+                    data["anyOf"] = branches
+                # Case D: 其他情况，取第一个有实质定义的非 null 分支递归清洗后合并
+                elif non_null_items:
+                    main_item = next(
+                        (
+                            item for item in non_null_items
+                            if (item.get("type") and item.get("type") != "null")
+                            or "properties" in item
+                            or "items" in item
+                            or "const" in item
+                            or "enum" in item
+                        ),
+                        non_null_items[0],
+                    )
+                    main_copy = copy.deepcopy(main_item)
+                    process_tool_parameters(main_copy)
+                    for k, v in main_copy.items():
+                        if k not in data:
+                            data[k] = v
+
+    # 0.5 处理单字段 const -> enum 以及联合类型数组 type: ["string", "null"]
+    if "const" in data:
+        const_val = data.pop("const")
+        if const_val is None:
+            data["nullable"] = True
+        else:
+            data["enum"] = [str(const_val)]
+            data["type"] = "string"
+
+    raw_type = data.get("type")
+    if isinstance(raw_type, list):
+        if "null" in raw_type or None in raw_type:
+            data["nullable"] = True
+        non_null_types = list(dict.fromkeys(t for t in raw_type if isinstance(t, str) and t != "null"))
+        if len(non_null_types) > 1:
+            # 真正的多类型联合：Gemini Schema 的 type 只能是标量，改写为 anyOf，每个类型一个分支。
+            data.pop("type")
+            branches = []
+            for type_name in non_null_types:
+                branch = {"type": type_name}
+                for field in _TYPE_SPECIFIC_SCHEMA_FIELDS.get(type_name, ()):
+                    if field in data:
+                        branch[field] = copy.deepcopy(data[field])
+                process_tool_parameters(branch)
+                branches.append(branch)
+            for type_name in non_null_types:
+                for field in _TYPE_SPECIFIC_SCHEMA_FIELDS.get(type_name, ()):
+                    data.pop(field, None)
+            data["anyOf"] = branches
+        else:
+            data["type"] = non_null_types[0] if non_null_types else "string"
+
+    if isinstance(data.get("enum"), list):
+        raw_enum = data["enum"]
+        if None in raw_enum:
+            data["nullable"] = True
+        clean_enum = [str(v) for v in raw_enum if v is not None]
+        if clean_enum:
+            data["enum"] = clean_enum
+            if "anyOf" not in data:
+                data["type"] = "string"
+        else:
+            data.pop("enum", None)
+
+    # 0.8 处理 prefixItems 与非 dict 的 items（元组数组或缺失 items 的 array）
+    if "prefixItems" in data:
+        prefix_items = data.pop("prefixItems")
+        if "items" not in data or isinstance(data.get("items"), bool):
+            if isinstance(prefix_items, list) and prefix_items and isinstance(prefix_items[0], dict):
+                data["items"] = copy.deepcopy(prefix_items[0])
+            else:
+                data["items"] = {"type": "string"}
+
+    # 1. 移除 Gemini 不支持的字段
+    for field in _GEMINI_UNSUPPORTED_SCHEMA_FIELDS:
+        data.pop(field, None)
+
+    # 2. 确保 required 中的属性在 properties 中确实存在
+    properties = data.get("properties")
+    required = data.get("required")
+    if isinstance(required, list):
+        if isinstance(properties, dict):
+            data["required"] = [field for field in required if field in properties]
+            if not data["required"]:
+                data.pop("required", None)
+        else:
+            data.pop("required", None)
+
+    # 3. 将 'default' 值移入 'description'
+    if "default" in data:
+        default_value = data.pop("default")
+        description = data.get("description", "")
+        data["description"] = f"{description}\nDefault: {default_value}".strip()
+
+    # 4. 补齐缺失的 type 并递归处理嵌套 properties 与 items
+    if isinstance(properties, dict):
+        data.setdefault("type", "object")
+        for val in properties.values():
+            process_tool_parameters(val)
+
+    items = data.get("items")
+    if isinstance(items, list):
+        data["items"] = copy.deepcopy(items[0]) if (items and isinstance(items[0], dict)) else {"type": "string"}
+        items = data["items"]
+    elif isinstance(items, bool):
+        data["items"] = {"type": "string"}
+        items = data["items"]
+
+    if data.get("type") == "array" and not isinstance(items, dict):
+        data["items"] = {"type": "string"}
+        items = data["items"]
+
+    if isinstance(items, dict):
+        data.setdefault("type", "array")
+        process_tool_parameters(items)
+
+
+def apply_gemini_response_format(request, generation_config: dict) -> None:
+    """将 OpenAI response_format (json_object / json_schema) 转换为 Gemini generationConfig 字段。"""
+    resp_fmt = getattr(request, "response_format", None)
+    if not resp_fmt:
+        return
+    fmt_type = resp_fmt.get("type") if isinstance(resp_fmt, dict) else getattr(resp_fmt, "type", None)
+    if fmt_type == "json_object":
+        generation_config["responseMimeType"] = "application/json"
+    elif fmt_type == "json_schema":
+        generation_config["responseMimeType"] = "application/json"
+        js_obj = resp_fmt.get("json_schema") if isinstance(resp_fmt, dict) else getattr(resp_fmt, "json_schema", None)
+        raw_schema = None
+        if isinstance(js_obj, dict):
+            raw_schema = js_obj.get("schema")
+        elif js_obj is not None:
+            raw_schema = getattr(js_obj, "schema", None)
+        if isinstance(raw_schema, dict) and raw_schema:
+            schema_copy = copy.deepcopy(raw_schema)
+            inline_schema_refs(schema_copy)
+            process_tool_parameters(schema_copy)
+            generation_config["responseSchema"] = schema_copy
+
+
 def _extract_tool_result_text(content) -> str:
     """将 tool content 的字符串或文本列表归一化为纯文本。"""
     if content is None:
@@ -429,131 +763,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
         'stop',
     ]
     generation_config = {}
-
-    def inline_schema_refs(parameters, extra_defs=None):
-        # 修改原因：MCP 等客户端的工具 schema 使用 JSON Schema $ref/$defs 共享类型定义，Gemini protobuf Schema 不认识 $ref 字段，直接报 Unknown name "$ref" 400；
-        #   且 RequestModel.model_dump 有意排除 defs 字段（防严格网关报错），dump 结果只剩悬空 $ref，需要从原始 pydantic 对象恢复定义。
-        # 修改方式：defs 优先取 parameters 内联的 $defs/definitions/defs，再用 extra_defs 补齐；无论 defs 是否为空都执行解析，
-        #   可解析的 $ref 原位展开为定义副本（$ref 同层其他属性覆盖定义同名字段），不可解析或展开超过 2 层的降级为宽松 object 并把引用名写入 description。
-        # 目的：保证发往 Gemini 的 schema 一定不含 $ref，递归引用按 Gemini 对 defs 递归深度的限制截断。
-        if not isinstance(parameters, dict):
-            return
-        defs = {}
-        for defs_key in ("$defs", "definitions", "defs"):
-            extracted = parameters.pop(defs_key, None)
-            if isinstance(extracted, dict):
-                defs.update(extracted)
-        if isinstance(extra_defs, dict):
-            for k, v in extra_defs.items():
-                defs.setdefault(k, v)
-
-        def _resolve(node, depth):
-            if isinstance(node, dict):
-                ref = node.get("$ref")
-                if isinstance(ref, str) and ref.startswith("#/"):
-                    name = ref.rsplit("/", 1)[-1]
-                    if depth >= 2 or name not in defs:
-                        node.pop("$ref", None)
-                        node.setdefault("type", "object")
-                        desc = node.get("description", "")
-                        node["description"] = f"{desc}\nSchema ref: {name}".strip()
-                    else:
-                        merged = copy.deepcopy(defs[name])
-                        for k, v in node.items():
-                            if k != "$ref":
-                                merged[k] = v
-                        node.clear()
-                        node.update(merged)
-                        _resolve(node, depth + 1)
-                        return
-                for value in node.values():
-                    _resolve(value, depth)
-            elif isinstance(node, list):
-                for item in node:
-                    _resolve(item, depth)
-
-        _resolve(parameters, 0)
-
-    def process_tool_parameters(data):
-        if isinstance(data, dict):
-            # 0. 处理逻辑组合符 (OpenAI anyOf/oneOf/allOf [..., null] -> Gemini nullable: True)
-            for key in ["anyOf", "oneOf", "allOf"]:
-                if key in data:
-                    logic_list = data.pop(key)
-                    if isinstance(logic_list, list) and logic_list:
-                        # 寻找第一个带 type 的项作为主要定义
-                        main_item = next((item for item in logic_list if isinstance(item, dict) and item.get("type") and item.get("type") != "null"), logic_list[0])
-                        if isinstance(main_item, dict):
-                            # 将主要项的属性合并回当前层，但保留当前层已有的 description 等
-                            for k, v in main_item.items():
-                                if k not in data:
-                                    data[k] = v
-                        # 如果列表中包含 type: null，设置 nullable
-                        if any(isinstance(item, dict) and item.get("type") == "null" for item in logic_list):
-                            data["nullable"] = True
-
-            # JSON Schema 的 nullable type 数组转为 Gemini 标量 type；保留多类型 union。
-            schema_type = data.get("type")
-            if isinstance(schema_type, list) and "null" in schema_type:
-                non_null_types = [t for t in schema_type if t != "null"]
-                if len(non_null_types) == 1:
-                    data["type"] = non_null_types[0]
-                    data["nullable"] = True
-
-            # 1. 移除 Gemini 不支持的字段
-            unsupported_fields = [
-                "additionalProperties",
-                "exclusiveMinimum",
-                "exclusiveMaximum",
-                "minLength",
-                "maxLength",
-                "pattern",
-                "$schema",
-                "dependencies",
-                "dependentRequired",
-                "dependentSchemas",
-                "unevaluatedItems",
-                "unevaluatedProperties",
-                "not",
-                "minItems",
-                "maxItems",
-                "uniqueItems",
-                "minimum",
-                "maximum",
-                "multipleOf",
-            ]
-            for field in unsupported_fields:
-                data.pop(field, None)
-
-            # 2. 核心修复：确保 required 中的属性在 properties 中确实存在
-            properties = data.get("properties")
-            required = data.get("required")
-            
-            if isinstance(required, list):
-                if isinstance(properties, dict):
-                    # 只保留在 properties 中存在的必填项
-                    data["required"] = [field for field in required if field in properties]
-                    if not data["required"]:
-                        data.pop("required")
-                else:
-                    # 如果没有 properties，则不能有 required
-                    data.pop("required", None)
-
-            # 3. 将 'default' 值移入 'description' (Gemini 部分模型对 default 支持不佳)
-            if "default" in data:
-                default_value = data.pop("default")
-                description = data.get("description", "")
-                data["description"] = f"{description}\nDefault: {default_value}"
-
-            # 4. 递归处理嵌套的 properties
-            if isinstance(properties, dict):
-                for val in properties.values():
-                    process_tool_parameters(val)
-            
-            # 处理 items (针对 array 类型)
-            items = data.get("items")
-            if isinstance(items, dict):
-                process_tool_parameters(items)
+    apply_gemini_response_format(request, generation_config)
 
     for field, value in request.model_dump(exclude_unset=True).items():
         if field not in miss_fields and value is not None:

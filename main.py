@@ -9,6 +9,7 @@ except ModuleNotFoundError:
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from starlette.responses import Response
@@ -393,10 +394,13 @@ async def cleanup_expired_raw_data():
                             if not db_path:
                                 db_path = "data/stats.db"
                             async with aiosqlite.connect(db_path) as vacuum_conn:
-                                # 每次回收最多 2000 页（约 8MB），轻量不阻塞
-                                # [fix 2026-10-25] execute() 只单步执行一次，每轮仅回收 1 页（线上 freelist 积压 5 万页）；
-                                # executescript 会把 PRAGMA 跑完，真正回收 N 页。
-                                await vacuum_conn.executescript("PRAGMA incremental_vacuum(2000);")
+                                # 每次回收最多 2000 页（约 8MB），轻量不阻塞。
+                                # 必须 fetchall() 消费游标，否则 SQLite 只会 step 1 页就停下；
+                                # 附带一次非阻塞 PASSIVE checkpoint。
+                                async with vacuum_conn.execute("PRAGMA incremental_vacuum(2000)") as cur:
+                                    await cur.fetchall()
+                                async with vacuum_conn.execute("PRAGMA wal_checkpoint(PASSIVE)") as cur:
+                                    await cur.fetchall()
                                 logger.info("SQLite incremental_vacuum completed after raw data cleanup")
                         except Exception as ve:
                             logger.warning(f"SQLite incremental_vacuum failed (non-critical): {ve}")
@@ -1109,14 +1113,42 @@ SPA_ROUTES = ["/channels", "/playground", "/admin", "/settings", "/logs", "/logi
 # 缓存控制头：index.html 不缓存，静态资源（带 hash）长期缓存
 HTML_NO_CACHE_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
 ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}  # 1 年
+STATIC_ROOT = (Path(__file__).resolve().parent / "static").resolve()
+
+
+class CachedStaticFiles(StaticFiles):
+    """assets 挂载前置后仍保留带 hash 资源的长期缓存头。"""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 206, 304):
+            response.headers.update(ASSET_CACHE_HEADERS)
+        return response
+
+
+# 静态资源挂载必须在 catch-all fallback 之前注册，否则会被 /{path:path} 抢先匹配。
+# 未构建前端时 static 目录可能只有 .gitkeep，只在目录存在时挂载。
+for _asset_dir in ("assets", "icons"):
+    _directory = STATIC_ROOT / _asset_dir
+    if _directory.is_dir() and _directory.resolve().is_relative_to(STATIC_ROOT):
+        _handler = CachedStaticFiles if _asset_dir == "assets" else StaticFiles
+        app.mount(f"/{_asset_dir}", _handler(directory=_directory), name=_asset_dir)
 
 @app.get("/{path:path}")
 async def spa_fallback(path: str):
-    index_html = "./static/index.html"
+    if path.startswith(("/", "\\")) or "\\" in path or "\x00" in path or ".." in Path(path).parts:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        candidate = (STATIC_ROOT / path).resolve()
+        index_html = (STATIC_ROOT / "index.html").resolve()
+        if not candidate.is_relative_to(STATIC_ROOT) or not index_html.is_relative_to(STATIC_ROOT):
+            raise ValueError("Path escapes static root")
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=404, detail="Not found") from None
 
     # 检查是否是前端 SPA 路由
     if path == "" or any(path.startswith(route.lstrip("/")) for route in SPA_ROUTES):
-        if os.path.isfile(index_html):
+        if index_html.is_file():
             return FileResponse(index_html, headers=HTML_NO_CACHE_HEADERS)
         # 未构建前端时，不要 500；提示用户如何生成
         return JSONResponse(
@@ -1127,15 +1159,16 @@ async def spa_fallback(path: str):
         )
 
     # 尝试返回静态文件
-    static_file = f"./static/{path}"
-    if os.path.isfile(static_file):
+    if candidate.is_file():
+        if candidate.suffix == ".html":
+            return FileResponse(candidate, headers=HTML_NO_CACHE_HEADERS)
         # 带 hash 的静态资源可以长期缓存
         if "/assets/" in path or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf")):
-            return FileResponse(static_file, headers=ASSET_CACHE_HEADERS)
-        return FileResponse(static_file)
+            return FileResponse(candidate, headers=ASSET_CACHE_HEADERS)
+        return FileResponse(candidate)
 
     # 默认返回 index.html（若存在）
-    if os.path.isfile(index_html):
+    if index_html.is_file():
         return FileResponse(index_html, headers=HTML_NO_CACHE_HEADERS)
 
     return JSONResponse(
@@ -1144,14 +1177,6 @@ async def spa_fallback(path: str):
             "detail": "Frontend is not built.",
         },
     )
-
-# 添加静态文件挂载（用于 assets、icons 等静态资源）
-# 注意：当仅提交源代码且未构建前端时，static 目录可能只有 .gitkeep。
-# 因此这里只在目录存在时才挂载，避免启动时报错。
-if os.path.isdir("./static/assets"):
-    app.mount("/assets", StaticFiles(directory="./static/assets"), name="assets")
-if os.path.isdir("./static/icons"):
-    app.mount("/icons", StaticFiles(directory="./static/icons"), name="icons")
 
 if __name__ == '__main__':
     import uvicorn

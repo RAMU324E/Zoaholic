@@ -6,6 +6,7 @@
 - 该路由使用 /setup 前缀（非 /v1），避免被 StatsMiddleware 对 /v1 的 API Key 鉴权拦截。
 """
 
+import asyncio
 import os
 import secrets
 from typing import Optional
@@ -21,6 +22,7 @@ from db import DISABLE_DATABASE, async_session_scope
 
 
 router = APIRouter(prefix="/setup", tags=["Setup"])
+_setup_lock = asyncio.Lock()
 
 
 def _get_config_storage() -> str:
@@ -91,7 +93,7 @@ async def _get_admin_user():
         return await db.get(AdminUser, 1)
 
 
-async def _upsert_admin_user(username: str, password: str, jwt_secret: str) -> None:
+async def _create_admin_user(username: str, password: str, jwt_secret: str) -> None:
     from db import AdminUser
 
     if DISABLE_DATABASE:
@@ -111,23 +113,14 @@ async def _upsert_admin_user(username: str, password: str, jwt_secret: str) -> N
                     [1, username, pwd_hash, jwt_secret],
                 )
             else:
-                existing_secret = existing.get("jwt_secret")
-                next_secret = existing_secret if existing_secret else jwt_secret
-                await db.execute(
-                    "UPDATE admin_user SET username = ?, password_hash = ?, jwt_secret = ? WHERE id = ?",
-                    [username, pwd_hash, next_secret, 1],
-                )
+                raise HTTPException(status_code=409, detail="Already initialized")
         else:
             existing = await db.get(AdminUser, 1)
             if existing is None:
                 existing = AdminUser(id=1, username=username, password_hash=pwd_hash, jwt_secret=jwt_secret)
                 db.add(existing)
             else:
-                existing.username = username
-                existing.password_hash = pwd_hash
-                # 若之前没有 jwt_secret，则补上
-                if not getattr(existing, "jwt_secret", None):
-                    existing.jwt_secret = jwt_secret
+                raise HTTPException(status_code=409, detail="Already initialized")
             await db.commit()
 
 
@@ -182,6 +175,11 @@ async def setup_init(payload: SetupInitRequest = Body(...)):
     - 后续建议通过 /auth/login 使用“账号密码 + JWT”登录管理控制台。
     """
 
+    async with _setup_lock:
+        return await _setup_init(payload)
+
+
+async def _setup_init(payload: SetupInitRequest):
     if DISABLE_DATABASE:
         raise HTTPException(
             status_code=500,
@@ -206,7 +204,7 @@ async def setup_init(payload: SetupInitRequest = Body(...)):
 
     # 1) 写入/更新管理员账号 + 生成并持久化 JWT secret（用户无需手动配置 JWT_SECRET 环境变量）
     jwt_secret = secrets.token_urlsafe(48)
-    await _upsert_admin_user(payload.username.strip(), payload.password, jwt_secret)
+    await _create_admin_user(payload.username.strip(), payload.password, jwt_secret)
 
     # 同步到当前进程（避免无需重启即可登录）
     try:

@@ -66,8 +66,59 @@ def test_nullable_tool_type_arrays_in_payload(payload_builder, engine, base_url)
             },
             "values": {"type": "array", "items": {"type": "string", "nullable": True}},
             "legacy": {"type": "number", "nullable": True},
-            "union": {"type": ["string", "number", "null"]},
+            "union": (
+                {"anyOf": [{"type": "string"}, {"type": "number"}], "nullable": True}
+                if engine == "gemini"
+                # vertex_channel 保留自有的 schema 清洗（未移植 anyOf 改写）
+                else {"type": ["string", "number", "null"]}
+            ),
         },
         "required": ["pattern"],
     }
     assert request.model_dump(exclude_unset=True) == original_request
+
+
+def _convert(schema):
+    import copy
+    from core.channels.gemini_channel import process_tool_parameters
+
+    data = copy.deepcopy(schema)
+    process_tool_parameters(data)
+    return data
+
+
+def test_multi_type_union_moves_type_specific_fields_into_branches():
+    assert _convert({"type": ["array", "string", "null"], "items": {"type": ["integer", "null"]}, "description": "ids"}) == {
+        "description": "ids",
+        "nullable": True,
+        "anyOf": [
+            {"type": "array", "items": {"type": "integer", "nullable": True}},
+            {"type": "string"},
+        ],
+    }
+
+
+def test_typed_any_of_branches_are_kept():
+    schema = {"anyOf": [
+        {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+        {"type": "string"},
+        {"type": "null"},
+    ]}
+    assert _convert(schema) == {
+        "nullable": True,
+        "anyOf": [
+            {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+            {"type": "string"},
+        ],
+    }
+
+
+def test_constraint_only_any_of_falls_back_to_first_branch():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "anyOf": [{"required": ["a"]}, {"required": ["b"]}],
+    }
+    converted = _convert(schema)
+    assert "anyOf" not in converted
+    assert converted["type"] == "object"

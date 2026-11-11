@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import time
@@ -74,6 +75,9 @@ def decode_jwt(token: str) -> Optional[Dict[str, Any]]:
 
     try:
         header_b64, payload_b64, sig_b64 = token.split(".", 2)
+        header = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        if not isinstance(header, dict) or header.get("alg") != "HS256":
+            return None
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
         expected_sig = hmac.new(
             _jwt_secret().encode("utf-8"), signing_input, hashlib.sha256
@@ -88,9 +92,10 @@ def decode_jwt(token: str) -> Optional[Dict[str, Any]]:
             return None
 
         exp = payload.get("exp")
-        if exp is not None:
-            if int(time.time()) > int(exp):
-                return None
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            return None
+        if time.time() >= exp:
+            return None
 
         return payload
     except Exception:

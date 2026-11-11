@@ -1,19 +1,18 @@
 import asyncio
 import base64
-import ipaddress
 import mimetypes
-import socket
-import urllib.parse
 from typing import Optional
 
 import httpx
 from fastapi import HTTPException
 
+from core.public_fetch import PublicURLTransport, UnsafeFileURL, validate_file_url
+
 
 _shared_fetch_client: Optional[httpx.AsyncClient] = None
 _shared_fetch_client_lock = asyncio.Lock()
-# 响应体上限：防止恶意 URL 返回超大内容耗尽网关内存（图片/文件类输入远低于此值）。
-_MAX_FETCH_BYTES = 32 * 1024 * 1024
+MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_FILE_REDIRECTS = 5
 
 
 def parse_data_uri(data_uri: str) -> tuple[str, str]:
@@ -63,47 +62,16 @@ async def _get_shared_fetch_client() -> httpx.AsyncClient:
         if _shared_fetch_client is not None:
             return _shared_fetch_client
 
-        transport = httpx.AsyncHTTPTransport(http2=True, verify=False, retries=1)
-        limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+        transport = PublicURLTransport()
         timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=10.0)
         _shared_fetch_client = httpx.AsyncClient(
             transport=transport,
-            limits=limits,
             timeout=timeout,
             follow_redirects=False,
+            trust_env=False,
+            headers={"Accept-Encoding": "identity"},
         )
         return _shared_fetch_client
-
-
-def _validate_safe_public_url(url: str) -> None:
-    """校验 URL 仅指向公网 HTTP(S) 地址，防止 SSRF 探测本机/局域网/容器内网/云元数据。"""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError("Only public http/https URLs are allowed")
-    host = parsed.hostname.strip().lower()
-    if host in ("localhost", "localhost.localdomain") or host.endswith(".local") or host.endswith(".internal"):
-        raise ValueError("Internal hostnames are not allowed")
-    infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-    if not infos:
-        raise ValueError("Unable to resolve host")
-    for info in infos:
-        # 修改原因：IPv4-mapped IPv6（如 ::ffff:127.0.0.1）的 is_private 等属性按 IPv6 判断，可能绕过内网拦截。
-        # 修改方式：先剥离 scope id 并还原 ipv4_mapped，再统一用 is_global 做公网判定。
-        # 目的：阻止通过映射地址或其它非公网段访问本机/内网/元数据。
-        ip_str = str(info[4][0]).split("%", 1)[0]
-        ip_obj = ipaddress.ip_address(ip_str)
-        if getattr(ip_obj, "ipv4_mapped", None) is not None:
-            ip_obj = ip_obj.ipv4_mapped
-        if (
-            not ip_obj.is_global
-            or ip_obj.is_loopback
-            or ip_obj.is_private
-            or ip_obj.is_link_local
-            or ip_obj.is_multicast
-            or ip_obj.is_reserved
-            or ip_obj.is_unspecified
-        ):
-            raise ValueError("Access to private or internal IP addresses is forbidden")
 
 
 async def close_shared_fetch_client() -> None:
@@ -115,37 +83,41 @@ async def close_shared_fetch_client() -> None:
 
 
 async def fetch_url_content(url: str) -> tuple[bytes, str]:
-    client = await _get_shared_fetch_client()
     try:
-        current_url = url
-        for _ in range(4):
-            await asyncio.to_thread(_validate_safe_public_url, current_url)
-            # 修改原因：一次性读取 response.content 会被超大响应体耗尽内存。
-            # 修改方式：流式读取并累计字节数，超过 _MAX_FETCH_BYTES 立即中止。
-            # 目的：在保持原有重定向校验的同时限制单次 URL 拉取的响应体大小。
-            async with client.stream("GET", current_url) as response:
-                if response.is_redirect and response.headers.get("location"):
-                    current_url = urllib.parse.urljoin(current_url, response.headers["location"])
+        target = validate_file_url(url)
+        client = await _get_shared_fetch_client()
+        for hop in range(MAX_FILE_REDIRECTS + 1):
+            # Every new connection, including redirects, uses the public-only backend.
+            async with client.stream("GET", target) as response:
+                if response.is_redirect:
+                    location = response.headers.get("Location")
+                    if not location or hop == MAX_FILE_REDIRECTS:
+                        raise HTTPException(400, "File URL redirect limit exceeded")
+                    target = validate_file_url(response.url.join(location))
                     continue
                 response.raise_for_status()
+                # ponytail: identity-only HTTP responses avoid unbounded decompression.
+                # Supporting gzip/br later requires a bounded streaming decompressor;
+                # compressed file formats such as PDF/ZIP remain ordinary file bytes.
+                if response.headers.get("Content-Encoding", "identity").strip().lower() not in ("", "identity"):
+                    raise HTTPException(400, "Compressed HTTP file responses are not supported")
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) > MAX_FILE_BYTES:
+                    raise HTTPException(400, "File exceeds the 50 MiB download limit")
+                content = bytearray()
+                async for chunk in response.aiter_raw():
+                    if len(chunk) > MAX_FILE_BYTES - len(content):
+                        raise HTTPException(400, "File exceeds the 50 MiB download limit")
+                    content.extend(chunk)
                 content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
-                content_length = response.headers.get("Content-Length")
-                if content_length:
-                    try:
-                        declared_size = int(content_length)
-                    except ValueError:
-                        declared_size = 0
-                    if declared_size > _MAX_FETCH_BYTES:
-                        raise ValueError("Response body is too large")
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) > _MAX_FETCH_BYTES:
-                        raise ValueError("Response body is too large")
-                return bytes(body), content_type
-        raise ValueError("Too many redirects")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to fetch file from the provided URL.")
+                return bytes(content), content_type
+    except UnsafeFileURL:
+        raise HTTPException(400, "File URL must use an allowed public destination") from None
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError, OSError):
+        # Do not disclose internal addresses, response bodies or network errors.
+        raise HTTPException(400, "Unable to download the requested file") from None
 
 
 async def get_base64_file(file_url_or_data: str) -> tuple[str, str]:
@@ -160,4 +132,6 @@ async def get_base64_file(file_url_or_data: str) -> tuple[str, str]:
         mime_type, _ = parse_data_uri(file_url_or_data)
         return file_url_or_data, mime_type
     else:
+        if "://" in file_url_or_data:
+            raise HTTPException(400, "File URL must use HTTP or HTTPS")
         return file_url_or_data, "application/octet-stream"
