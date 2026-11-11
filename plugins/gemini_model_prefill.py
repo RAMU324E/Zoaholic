@@ -144,6 +144,8 @@ def apply_model_prefill(payload: Dict[str, Any], text: str, ais_cot: bool = Fals
     if not model_parts:
         return False
     contents.append({"role": "model", "parts": model_parts})
+    if ais_cot and not text:
+        contents.append({"role": "user", "parts": [{"text": ".", "thought": True}]})
     return True
 
 

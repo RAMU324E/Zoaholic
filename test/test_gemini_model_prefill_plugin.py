@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from plugins.gemini_model_prefill import (
+    AIS_TEXT_CASTER_SIG,
+    AIS_TEXT_CASTER_THOUGHT_TEXT,
     DEFAULT_PREFILL,
     apply_model_prefill,
     gemini_model_prefill_request_interceptor,
@@ -65,7 +67,7 @@ def test_option_parsing_keeps_commas_and_falls_back_to_default():
 
 
 def test_interceptor_reads_channel_options():
-    provider = {"preferences": {"enabled_plugins": [{"name": "gemini_model_prefill", "params": {"text": "开始"}}]}}
+    provider = {"preferences": {"enabled_plugins": [{"name": "gemini_model_prefill", "params": {"text": "开始", "ais_cot": False}}]}}
     payload = {"contents": [_user()]}
     url, headers, out = asyncio.run(
         gemini_model_prefill_request_interceptor(None, "gemini", provider, None, "u", {}, payload)
@@ -75,4 +77,8 @@ def test_interceptor_reads_channel_options():
     default_provider = {"preferences": {"enabled_plugins": ["gemini_model_prefill"]}}
     payload2 = {"contents": [_user()]}
     asyncio.run(gemini_model_prefill_request_interceptor(None, "gemini", default_provider, None, "u", {}, payload2))
-    assert payload2["contents"][-1]["parts"][0]["text"] == DEFAULT_PREFILL
+    assert payload2["contents"][-2] == {
+        "role": "model",
+        "parts": [{"text": AIS_TEXT_CASTER_THOUGHT_TEXT, "thought": True, "thoughtSignature": AIS_TEXT_CASTER_SIG}],
+    }
+    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": ".", "thought": True}]}
