@@ -11,7 +11,7 @@ import os
 _DEFAULT_ITERATIONS = 120_000
 
 
-def hash_password(password: str, *, iterations: int = _DEFAULT_ITERATIONS) -> str:
+def hash_password(password: str | None, *, iterations: int = _DEFAULT_ITERATIONS) -> str:
     if password is None:
         raise ValueError("password is required")
     password_bytes = password.encode("utf-8")
@@ -24,7 +24,7 @@ def hash_password(password: str, *, iterations: int = _DEFAULT_ITERATIONS) -> st
     return f"pbkdf2_sha256${iterations}${salt_b64}${dk_b64}"
 
 
-def verify_password(password: str, password_hash: str) -> bool:
+def verify_password(password: str, password_hash: str | None) -> bool:
     if not password_hash or not isinstance(password_hash, str):
         return False
 

@@ -127,8 +127,8 @@ def lookup_price(model_name: str) -> Optional[tuple[float, float, float]]:
         修改方式：把外部价格库的 input_cached 作为第三段返回；没有缓存价时回退到 input。
         目的：保持原有输入、输出价格行为不变，同时让调用方可以按 cached_tokens 计算等效输入价。
         """
-        input_price = item.get("input", 0) or 0
-        output_price = item.get("output", 0) or 0
+        input_price = item.get("input") or 0
+        output_price = item.get("output") or 0
         cached_price = item.get("input_cached") or input_price
         return input_price, output_price, cached_price
 

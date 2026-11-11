@@ -440,10 +440,10 @@ async def fetch_aws_passthrough_stream(client, url, headers, payload, model, tim
     # 修改方式：沿用现有 AWS 流式解析中的 base64 bytes 解码逻辑，但不转换为 OpenAI chunk。
     # 目的：Claude Code 等原生 Anthropic 客户端可以通过 AWS 渠道读取 Claude SSE 事件。
     from ..log_config import logger
-    from ..response import _log_upstream_request
+    from ..response import log_upstream_request
     import httpx
 
-    _log_upstream_request(url, payload)
+    log_upstream_request(url, payload)
 
     stream_timeout = httpx.Timeout(
         connect=15.0,
@@ -491,10 +491,10 @@ async def fetch_aws_passthrough_response(client, url, headers, payload, model, t
     # 修改原因：非流式 Bedrock invoke 已返回 Claude Messages API JSON，不需要 OpenAI 格式转换。
     # 修改方式：使用与通用透传类似的 POST/JSON 发送逻辑，只保留 AWS channel 内部日志与错误检查。
     # 目的：让 Claude 方言非流式请求通过 AWS 渠道得到原生 Claude JSON 响应。
-    from ..response import _log_upstream_request
+    from ..response import log_upstream_request
     import httpx
 
-    _log_upstream_request(url, payload)
+    log_upstream_request(url, payload)
 
     request_timeout = httpx.Timeout(
         connect=15.0,
@@ -668,9 +668,10 @@ async def fetch_aws_response_stream(client, url, headers, payload, model, timeou
     yield "data: [DONE]" + end_of_line
 
 
-def _sign_get_request(path, aws_access_key, aws_secret_key, aws_region, host, service="bedrock"):
+def _sign_get_request(path, aws_access_key, aws_secret_key, aws_region, host):
     """SigV4 签名 GET 请求（无 body）"""
     import urllib.parse
+    service = "bedrock"
     t = datetime.datetime.now(timezone.utc)
     amz_date = t.strftime('%Y%m%dT%H%M%SZ')
     date_stamp = t.strftime('%Y%m%d')
@@ -736,7 +737,7 @@ async def fetch_aws_models(client, provider):
     host = f'bedrock.{aws_region}.amazonaws.com'
     path = '/foundation-models'
 
-    headers = _sign_get_request(path, aws_ak, aws_sk, aws_region, host, service='bedrock')
+    headers = _sign_get_request(path, aws_ak, aws_sk, aws_region, host)
     url = f'https://{host}{path}'
 
     logger.debug(f'[aws] ListFoundationModels: {url}')

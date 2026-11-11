@@ -33,7 +33,7 @@ from ..response_context import mark_adapter_metrics_managed, mark_content_start,
 # ============================================================
 
 
-def _extract_prompt_and_images(request) -> tuple:
+def extract_prompt_and_images(request) -> tuple:
     """
     从 RequestModel 的 messages 中提取 prompt 文本和图片数据。
 
@@ -56,12 +56,10 @@ def _extract_prompt_and_images(request) -> tuple:
         elif isinstance(msg.content, list):
             text_parts = []
             for item in msg.content:
-                item_type = getattr(item, "type", None)
-                if item_type == "text" and getattr(item, "text", None):
+                if item.type == "text" and item.text:
                     text_parts.append(item.text)
-                elif item_type == "image_url" and getattr(item, "image_url", None):
-                    url = item.image_url.url if hasattr(item.image_url, "url") else str(item.image_url)
-                    images.append(url)
+                elif item.type == "image_url" and item.image_url:
+                    images.append(item.image_url.url)
             prompt = "\n".join(text_parts)
         break
 
@@ -127,7 +125,7 @@ async def get_image_payload(request, engine, provider, api_key=None):
             break
 
     # 从 messages 提取 prompt
-    prompt, images = _extract_prompt_and_images(request)
+    prompt, images = extract_prompt_and_images(request)
     if not prompt:
         prompt = "Generate an image"  # fallback
 
@@ -356,3 +354,6 @@ def register():
         stream_adapter=fetch_image_stream,
         source="builtin",
     )
+
+
+_extract_prompt_and_images = extract_prompt_and_images

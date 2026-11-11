@@ -16,6 +16,7 @@ Responses API WebSocket 透传端点
 上游是否走 WS 由渠道的 preferences.websocket 开关独立决定，两端解耦。
 """
 
+import os
 import uuid
 from time import time
 from typing import Any, Optional
@@ -26,6 +27,7 @@ from ..json_utils import json_loads, json_dumps_text
 from ..log_config import logger
 
 router = APIRouter()
+MAX_WS_FRAME_BYTES = int(os.getenv("WS_MAX_FRAME_BYTES", str(10 * 1024 * 1024)))
 
 
 # ==================== 帧工具 ====================
@@ -46,60 +48,39 @@ async def _send_error_frame(websocket: WebSocket, status: int, message: str,
 
 
 def _get_client_ip(websocket: WebSocket) -> str:
-    """与 StatsMiddleware 相同的客户端 IP 解析优先级（取反代追加的最右侧 IP 防伪造）。"""
-    forwarded_for = websocket.headers.get("x-forwarded-for")
-    if forwarded_for:
-        ips = [ip.strip() for ip in forwarded_for.split(",") if ip.strip()]
-        if ips:
-            return ips[-1]
-    real_ip_header = websocket.headers.get("x-real-ip")
-    if real_ip_header:
-        return real_ip_header.strip()
+    from core.http_headers import extract_client_ip
     client = websocket.client
-    return client.host if client else "unknown"
+    return extract_client_ip(websocket.headers, client.host if client else None)
 
 
 def _authenticate(websocket: WebSocket) -> tuple[Optional[int], Optional[str], Optional[str]]:
-    """WS 握手鉴权，复用 HTTP 路径同款逻辑。
+    """WS 握手鉴权，统一复用 HTTP 鉴权函数 authenticate_api_key_token。
 
-    返回 (api_index, token, error_msg)。error_msg 非空表示鉴权失败。
+    返回 (api_index, token_for_stats, error_msg)。error_msg 非空表示鉴权失败。
     """
     app = websocket.app
+    from fastapi import HTTPException
+    from core.auth import authenticate_api_key_token
     from core.middleware import get_api_key_from_headers
-    from core.auth import is_api_key_disabled
-    from core.ip_blacklist import is_global_ip_blocked, is_key_ip_blocked
 
     headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
                for k, v in websocket.headers.items()]
     token = get_api_key_from_headers(headers)
-    if not token:
-        return None, None, "Invalid or missing API Key"
+    client_ip = _get_client_ip(websocket)
+
+    try:
+        api_index = authenticate_api_key_token(app, token, client_ip, request=websocket)
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            msg = str((detail.get("error") or {}).get("message") or "IP is blocked")
+        else:
+            msg = str(detail or "Unauthorized")
+        return None, None, msg
 
     api_list = getattr(app.state, "api_list", [])
-    try:
-        api_index = api_list.index(token)
-    except ValueError:
-        return None, None, "Invalid or missing API Key"
-
-    # 修改原因：BYOK 模板 Key（byok-xxx-*）只是本地身份前缀，不能直接作为上游凭证使用。
-    # 修改方式：与 HTTP 路径一致，精确命中 BYOK 模板时视为鉴权失败。
-    # 目的：防止客户端只提交裸模板 Key 绕过 BYOK 真实上游 Key 校验。
-    from core.byok import is_byok_api_key
-    if is_byok_api_key(getattr(app.state, "api_keys_db", []), api_index):
-        api_index = None
-    if api_index is None:
-        return None, None, "Invalid or missing API Key"
-
-    if is_api_key_disabled(app, api_index):
-        return None, None, "API Key has been disabled"
-
-    client_ip = _get_client_ip(websocket)
-    if is_global_ip_blocked(app, client_ip):
-        return None, None, "IP is blocked"
-    if is_key_ip_blocked(app, api_index, client_ip):
-        return None, None, "IP is blocked"
-
-    return api_index, token, None
+    token_for_stats = api_list[api_index] if 0 <= api_index < len(api_list) else token
+    return api_index, token_for_stats, None
 
 
 # ==================== Chat Completions → Responses API 转换 ====================
@@ -416,6 +397,13 @@ async def _handle_response_create(websocket: WebSocket, payload: dict, api_index
 @router.websocket("/v1/responses")
 async def responses_websocket(websocket: WebSocket) -> None:
     """Responses API WebSocket mode 端点，协议与 OpenAI 官方一致。"""
+    from core.initialization import ensure_initialized
+    from fastapi import HTTPException
+    try:
+        await ensure_initialized(websocket.app)
+    except HTTPException:
+        await websocket.close(code=1008, reason="Instance is not initialized")
+        return
     api_index, token, error_msg = _authenticate(websocket)
     if api_index is None:
         # 1008 Policy Violation：与官方 Codex 客户端对策略拒绝的处理一致
@@ -429,6 +417,9 @@ async def responses_websocket(websocket: WebSocket) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
+            if len(raw.encode("utf-8")) > MAX_WS_FRAME_BYTES:
+                await _send_error_frame(websocket, 413, "frame payload too large", code="payload_too_large")
+                continue
             try:
                 frame = json_loads(raw)
             except Exception:
@@ -451,6 +442,14 @@ async def responses_websocket(websocket: WebSocket) -> None:
                 await _send_error_frame(websocket, 400, "missing required field: model")
                 continue
 
+            from core.auth import rate_limiter
+            if await rate_limiter.is_rate_limited("global", websocket.app.state.global_rate_limit):
+                await _send_error_frame(websocket, 429, "Too many requests", code="rate_limit_exceeded")
+                continue
+            api_index, token, error_msg = _authenticate(websocket)
+            if api_index is None:
+                await _send_error_frame(websocket, 403, error_msg or "Unauthorized")
+                continue
             await _handle_response_create(websocket, payload, api_index, token, client_ip)
     except WebSocketDisconnect:
         pass

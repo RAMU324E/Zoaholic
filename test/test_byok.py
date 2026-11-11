@@ -31,6 +31,10 @@ class _App:
     """测试用最小 app；目的在于承载 verify_api_key 和 handler 需要的 state。"""
 
     def __init__(self, **state):
+        state.setdefault('admin_initialized', True)
+        entries = state.get('config', {}).get('api_keys') or [{'api': key} for key in state.get('api_list', [])]
+        state.setdefault('api_keys_db', entries)
+        state.setdefault('config', {'api_keys': entries})
         self.state = _State(**state)
 
 

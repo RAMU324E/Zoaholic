@@ -472,7 +472,7 @@ class ClaudeStreamRenderer:
             result += self._make_block_start(block_type, **kwargs)
         return result
 
-    async def __call__(self, canonical_sse_chunk: str) -> str:
+    async def __call__(self, canonical_sse_chunk: Any) -> Any:
         if not isinstance(canonical_sse_chunk, str):
             return canonical_sse_chunk
 
@@ -610,17 +610,12 @@ class ClaudeStreamRenderer:
         return result or ""
 
 
-def create_claude_stream_renderer():
-    """工厂函数：为每次流请求创建独立的有状态 Claude SSE 渲染器"""
-    return ClaudeStreamRenderer()
-
-
 async def render_claude_stream(canonical_sse_chunk: str) -> str:
     """
     无状态兼容接口（保留供直接调用场景使用）。
 
     注意：此函数不生成 message_start / content_block_start / content_block_stop
-    等生命周期事件。完整协议兼容请使用 create_claude_stream_renderer() 工厂。
+    等生命周期事件。完整协议兼容请使用 ClaudeStreamRenderer() 工厂。
     """
     renderer = ClaudeStreamRenderer()
     renderer._message_started = True  # 跳过 message_start，保持旧行为
@@ -671,7 +666,7 @@ def register() -> None:
             parse_request=parse_claude_request,
             render_response=render_claude_response,
             render_stream=render_claude_stream,
-            render_stream_factory=create_claude_stream_renderer,
+            render_stream_factory=ClaudeStreamRenderer,
             parse_usage=parse_claude_usage,
             target_engine="claude",
             endpoints=[
@@ -696,3 +691,5 @@ def register() -> None:
             ],
         )
     )
+
+create_claude_stream_renderer = ClaudeStreamRenderer

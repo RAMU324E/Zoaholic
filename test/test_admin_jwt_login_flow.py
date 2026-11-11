@@ -7,7 +7,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -28,6 +28,7 @@ def gateway(monkeypatch):
         {'api': 'fixture-user-key', 'role': 'user'},
         {'api': 'fixture-admin-key', 'role': 'admin'},
     ]
+    app.state.admin_initialized = True
     app.state.config = {'api_keys': entries, 'preferences': {'log_raw_data_retention_hours': 0}}
     app.state.api_keys_db = entries
     app.state.api_list = [entry['api'] for entry in entries]
@@ -131,18 +132,24 @@ def test_single_key_admin_fallback_matches_existing_auth_contract(gateway):
     response = call(gateway, jwt.issue_jwt({'role': 'admin'}))
     assert response.status_code == 200
     assert response.json()['stats_key'] == 'admin-jwt'
+    key_response = call(gateway, jwt.issue_jwt({'role': 'admin'}), '/v1/test-key')
+    assert key_response.status_code == 200
+    assert key_response.json()['stats_key'] == 'single-fixture-key'
 
 
-def test_multi_key_without_explicit_admin_role_falls_back_to_first_key(gateway):
-    entries = [{'api': 'first-owner-key', 'name': 'my'}, {'api': 'second-friend-key', 'name': 'friend'}]
+@pytest.mark.parametrize('entries', [
+    [{'api': 'first-owner-key', 'name': 'my'}, {'api': 'second-friend-key', 'name': 'friend'}],
+    [{'api': 'only-user-key', 'role': 'user'}],
+])
+def test_admin_jwt_does_not_map_to_non_admin_keys(gateway, entries):
     gateway.state.api_keys_db = entries
     gateway.state.config['api_keys'] = entries
-    gateway.state.api_list = ['first-owner-key', 'second-friend-key']
+    gateway.state.api_list = [entry['api'] for entry in entries]
     token = jwt.issue_jwt({'sub': 'fixture-admin', 'role': 'admin'})
-    for path in ['/v1/test-admin', '/v1/test-key']:
-        response = call(gateway, token, path)
-        assert response.status_code == 200
-        assert response.json()['stats_key'] == ('admin-jwt' if path == '/v1/test-admin' else 'first-owner-key')
+    management = call(gateway, token, '/v1/test-admin')
+    assert management.status_code == 200
+    assert management.json()['stats_key'] == 'admin-jwt'
+    assert call(gateway, token, '/v1/test-key').status_code == 403
 
 
 def test_login_token_reaches_protected_management_route(gateway, monkeypatch):
@@ -155,6 +162,7 @@ def test_login_token_reaches_protected_management_route(gateway, monkeypatch):
     monkeypatch.setattr(auth_routes, 'DISABLE_DATABASE', False)
     monkeypatch.setattr(auth_routes, 'DB_TYPE', 'sqlite')
     monkeypatch.setattr(auth_routes, 'async_session_scope', session)
+    monkeypatch.setattr(auth_routes, 'get_admin_user', AsyncMock(return_value=user))
     monkeypatch.setattr(auth_routes, 'get_app', lambda: gateway)
     gateway.include_router(auth_routes.router)
     async def run():
@@ -186,15 +194,14 @@ def test_byok_identity_still_uses_template_and_rejects_bare_template(gateway):
 
 
 
-def test_admin_console_does_not_require_an_api_key_mapping(gateway):
-    # Upstream v1.7.17 deliberately permits admin JWT management independently
-    # of gateway key availability; route-level admin checks still apply.
+def test_missing_config_requires_authenticated_setup_recovery(gateway):
+    # Strict Initialization keeps protected APIs closed until config recovery;
+    # the setup HTTP-flow suite verifies ownership-preserving recovery.
     gateway.state.api_keys_db = []
     gateway.state.config['api_keys'] = []
     gateway.state.api_list = []
     response = call(gateway, jwt.issue_jwt({'role': 'admin'}))
-    assert response.status_code == 200
-    assert response.json()['stats_key'] == 'admin-jwt'
+    assert response.status_code == 503
 
 
 def test_admin_console_ignores_gateway_quota_exhaustion(gateway, monkeypatch):

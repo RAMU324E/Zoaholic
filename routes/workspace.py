@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
+from core.file_utils import is_link_or_reparse
+
 from routes.deps import rate_limit_dependency, verify_admin_api_key
 
 # 修改原因：本文件全部端点（浏览/读/写/删/下载后端文件）都是管理面能力，
@@ -67,9 +69,15 @@ def _normalize_rel(rel_path: str) -> str:
 def _resolve_path(rel_path: str) -> Path:
     """将相对路径解析为绝对路径，并验证不超出项目根目录。"""
     normalized = _normalize_rel(rel_path)
-    absolute = (PROJECT_ROOT / normalized).resolve()
-    # 确保在项目根目录内
-    if not str(absolute).startswith(str(PROJECT_ROOT)):
+    root = PROJECT_ROOT.resolve()
+    current = root
+    for part in PurePosixPath(normalized).parts:
+        current = current / part
+        if is_link_or_reparse(current):
+            raise HTTPException(status_code=403, detail="不允许访问符号链接")
+    absolute = (root / normalized).resolve()
+    # 真实路径归属不能使用字符串前缀（例如 project-other）。
+    if not absolute.is_relative_to(root):
         raise HTTPException(status_code=403, detail="路径超出允许范围")
     return absolute
 
@@ -80,10 +88,13 @@ def _get_permissions(rel_path: str) -> str:
     if not normalized:
         return ""
 
-    # 检查文件名/扩展名是否在黑名单中
-    name = Path(normalized).name
-    suffix = Path(normalized).suffix.lower()
-    if name in BLOCKED_NAMES or suffix in BLOCKED_EXTENSIONS:
+    # 黑名单覆盖父目录，不能通过 data/.git/config 等后代路径绕过。
+    for part in PurePosixPath(normalized).parts:
+        if part.lower() in BLOCKED_NAMES or Path(part).suffix.lower() in BLOCKED_EXTENSIONS:
+            return ""
+    try:
+        _resolve_path(normalized)
+    except HTTPException:
         return ""
 
     best_match = ""

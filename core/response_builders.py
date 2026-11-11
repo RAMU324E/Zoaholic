@@ -394,7 +394,7 @@ async def get_encode_image(image_url):
     return base64_image
 
 
-def _convert_webp_base64_to_png(base64_image: str) -> tuple[str, str]:
+def convert_webp_base64_to_png(base64_image: str) -> tuple[str, str]:
     image_data = base64.b64decode(extract_base64_data(base64_image))
     with Image.open(io.BytesIO(image_data)) as image:
         png_buffer = io.BytesIO()
@@ -403,7 +403,10 @@ def _convert_webp_base64_to_png(base64_image: str) -> tuple[str, str]:
     return f"data:image/png;base64,{png_base64}", "image/png"
 
 
-def _prepare_image_for_upload(base64_image: str, max_size_mb: float) -> dict:
+_convert_webp_base64_to_png = convert_webp_base64_to_png
+
+
+def prepare_image_for_upload(base64_image: str, max_size_mb: float) -> dict:
     base64_data = extract_base64_data(base64_image)
     image_size_bytes = len(base64_data) * 3 // 4
     image_size_mb = image_size_bytes / (1024 * 1024)
@@ -432,6 +435,9 @@ def _prepare_image_for_upload(base64_image: str, max_size_mb: float) -> dict:
     compressed_size_mb = len(compressed_base64) * 3 // 4 / (1024 * 1024)
     result.update({"base64_data": compressed_base64, "compressed": True, "compressed_size_mb": compressed_size_mb, "size": (new_width, new_height)})
     return result
+
+
+_prepare_image_for_upload = prepare_image_for_upload
 
 # from PIL import Image
 # import io

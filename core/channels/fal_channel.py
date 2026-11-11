@@ -20,7 +20,7 @@ from ..json_utils import json_dumps_text, json_loads
 from ..response import check_response
 from ..response_context import mark_adapter_metrics_managed, mark_content_start
 from ..utils import end_of_line, generate_sse_response, get_model_dict, resolve_base_url
-from .openai_image_channel import _extract_prompt_and_images as _extract_openai_image_prompt_and_images
+from .openai_image_channel import extract_prompt_and_images as _extract_openai_image_prompt_and_images
 
 
 # 修改原因：fal 原生接口不接受 Chat Completions 的控制字段。
@@ -55,7 +55,7 @@ _CHAT_COMPLETIONS_FIELDS = {
 # 修改原因：部分 fal 端点虽然走同一个 API 域名，但长任务必须使用 queue.fal.run。
 # 修改方式：把模型名关键词判断集中到一个函数，并允许 provider.preferences.fal_mode 显式覆盖。
 # 目的：避免视频、音频和 3D 请求误发到同步端点，也允许管理员按需强制同步或队列模式。
-def _should_use_queue(model_name: str, provider: dict) -> bool:
+def _should_use_queue(model_name: str, provider: dict | None) -> bool:
     """判断当前 fal 请求是否应使用队列模式。"""
     preferences = provider.get("preferences", {}) if isinstance(provider, dict) else {}
     mode = preferences.get("fal_mode") if isinstance(preferences, dict) else None
@@ -133,7 +133,7 @@ def _extract_prompt_and_images(request) -> tuple[str, list[str]]:
 # 修改原因：fal 同一个响应可能包含图片、视频、音频、3D 文件、seed 和改写后的 prompt。
 # 修改方式：把所有媒体 URL 拼接为 markdown 字符串。
 # 目的：满足客户端直接从 message.content 读取结果的要求，不使用结构化 content items。
-def _format_fal_result(response_json: dict, payload: dict) -> str:
+def _format_fal_result(response_json: Any, payload: dict) -> str:
     """把 fal 响应统一格式化为 markdown string。"""
     if not isinstance(response_json, dict):
         return ""

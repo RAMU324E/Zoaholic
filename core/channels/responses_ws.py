@@ -314,7 +314,7 @@ async def fetch_responses_ws_stream(url, headers, payload, model, timeout, proxy
     on_headers: 可选回调，接收握手响应头与 error 帧内嵌 headers（codex 额度采集用）。
     """
     # 延迟导入避免循环依赖：openai_responses_channel 的传输入口也 import 本模块
-    from .openai_responses_channel import _responses_events_to_sse
+    from .openai_responses_channel import responses_events_to_sse
 
     auth_key = ""
     for k, v in (headers or {}).items():
@@ -361,7 +361,7 @@ async def fetch_responses_ws_stream(url, headers, payload, model, timeout, proxy
         held = None
         try:
             async with asyncio.timeout(timeout or 200):
-                async for sse_string in _responses_events_to_sse(_tracked_events(), model):
+                async for sse_string in responses_events_to_sse(_tracked_events(), model):
                     if held is not None:
                         sent_any = True
                         yield held

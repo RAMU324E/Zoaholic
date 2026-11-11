@@ -235,7 +235,7 @@ def parse_passthrough_usage(data: Any) -> Optional[Dict[str, int]]:
     cache_usage = extract_cache_usage(usage)
     if "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
         # Claude 原生 input_tokens 不含缓存部分；透传统计需要还原为统一 prompt_tokens 口径。
-        prompt = (usage.get("input_tokens", 0) or 0) + cache_usage["cached_tokens"] + cache_usage["cache_creation_tokens"]
+        prompt = (usage.get("input_tokens") or 0) + cache_usage["cached_tokens"] + cache_usage["cache_creation_tokens"]
     else:
         prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
     completion = usage.get("completion_tokens") or usage.get("output_tokens") or 0

@@ -425,7 +425,7 @@ class InterceptorRegistry:
         Returns:
             经过所有拦截器处理后的 request_data
         """
-        interceptors = self.get_inbound_interceptors(enabled_only=True)
+        interceptors = self.get_inbound_interceptors()
         
         enabled_plugin_names = None
         if enabled_plugins is not None:
@@ -515,7 +515,7 @@ class InterceptorRegistry:
 
         enabled_plugins 来自 provider.preferences.enabled_plugins。
         """
-        interceptors = self.get_channel_inbound_interceptors(enabled_only=True)
+        interceptors = self.get_channel_inbound_interceptors()
         token = _current_enabled_plugins.set(enabled_plugins)
 
         # 修改原因：渠道入站阶段和请求拦截阶段使用相同 enabled_plugins 过滤规则。
@@ -641,7 +641,7 @@ class InterceptorRegistry:
         Returns:
             (url, headers, payload) 经过所有拦截器处理后的结果
         """
-        interceptors = self.get_request_interceptors(enabled_only=True)
+        interceptors = self.get_request_interceptors()
         
         # 解析 enabled_plugins，提取插件名（忽略参数部分用于过滤）
         enabled_plugin_names = None
@@ -663,6 +663,9 @@ class InterceptorRegistry:
                     else:
                         logger.warning(f"Request interceptor '{interceptor.id}' returned invalid result, expected (url, headers, payload)")
             except Exception as e:
+                # 文件大小是拒绝边界，不能吞掉后继续发送原始超大载荷。
+                if interceptor.plugin_name == "file_to_text" and isinstance(e, HTTPException) and e.status_code == 413:
+                    raise
                 logger.error(f"Request interceptor '{interceptor.id}' error: {e}")
                 # 继续执行其他拦截器
         
@@ -757,7 +760,7 @@ class InterceptorRegistry:
         Returns:
             经过所有拦截器处理后的响应数据
         """
-        interceptors = self.get_response_interceptors(enabled_only=True)
+        interceptors = self.get_response_interceptors()
         
         # 将 enabled_plugins 写入 ContextVar，供回调通过 get_current_plugin_options() 读取
         token = _current_enabled_plugins.set(enabled_plugins)
@@ -855,7 +858,7 @@ class InterceptorRegistry:
 
         enabled_plugins 来自 provider.preferences.enabled_plugins。
         """
-        interceptors = self.get_channel_outbound_interceptors(enabled_only=True)
+        interceptors = self.get_channel_outbound_interceptors()
         token = _current_enabled_plugins.set(enabled_plugins)
         enabled_plugin_names = None
         if enabled_plugins is not None:
@@ -946,7 +949,7 @@ class InterceptorRegistry:
 
         enabled_plugins 来自 api_keys[].preferences.enabled_plugins。
         """
-        interceptors = self.get_key_outbound_interceptors(enabled_only=True)
+        interceptors = self.get_key_outbound_interceptors()
         token = _current_enabled_plugins.set(enabled_plugins)
         enabled_plugin_names = None
         if enabled_plugins is not None:
@@ -1056,7 +1059,7 @@ class InterceptorRegistry:
         Returns:
             经过所有补充器处理后的余额结果字典
         """
-        enrichers = self.get_balance_enrichers(enabled_only=True)
+        enrichers = self.get_balance_enrichers()
         if result is None:
             result = {}
         

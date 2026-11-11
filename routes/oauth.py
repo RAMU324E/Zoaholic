@@ -411,7 +411,7 @@ async def _sync_provider_api_key_rename(app, channel_id: str, old_key_id: str, n
     # 修改原因：rename API 原先只更新 OAuthManager state，api.yaml 中 provider.api 仍保留旧 key_id。
     # 修改方式：在 app.state.config.providers 中定位当前 provider，替换 api 字段里的旧 key，并复用 admin 的持久化流程写回配置。
     # 目的：用户在 OAuth Key 输入框失焦改名后，不需要再手动保存渠道也能让 api.yaml 与 oauth_state.json 保持一致。
-    config = getattr(getattr(app, "state", None), "config", None)
+    config = getattr(app.state, "config", None) if app is not None else None
     if not isinstance(config, dict):
         return False
     providers = config.get("providers")
@@ -444,9 +444,9 @@ async def _sync_provider_api_key_rename(app, channel_id: str, old_key_id: str, n
     if not changed:
         return False
 
-    from routes.admin import _persist_config
+    from routes.admin import persist_config
 
-    await _persist_config(app, sections_to_verify=["providers"], changed_providers={channel_id})
+    await persist_config(app, sections_to_verify=["providers"], changed_providers={channel_id})
     return True
 
 
@@ -461,7 +461,7 @@ async def _sync_provider_api_key_add(app, channel_id: str, key_id: str) -> bool:
     """
     if not key_id:
         return False
-    config = getattr(getattr(app, "state", None), "config", None)
+    config = getattr(app.state, "config", None) if app is not None else None
     if not isinstance(config, dict):
         return False
     providers = config.get("providers")
@@ -501,9 +501,9 @@ async def _sync_provider_api_key_add(app, channel_id: str, key_id: str) -> bool:
     if not changed:
         return False
 
-    from routes.admin import _persist_config
+    from routes.admin import persist_config
 
-    await _persist_config(app, sections_to_verify=["providers"], changed_providers={channel_id})
+    await persist_config(app, sections_to_verify=["providers"], changed_providers={channel_id})
     return True
 
 

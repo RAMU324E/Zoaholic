@@ -44,6 +44,7 @@ class LoggingStreamingResponse(Response):
         super().__init__(content=None, status_code=status_code, headers=headers, media_type=media_type)
         self.body_iterator = content
         self._closed = False
+        self._has_real_usage = False
         self.current_info = current_info if current_info is not None else {}
         # 修改原因：流式 Response 持有 FastAPI app 强引用会把 app.state 上的注册表一并留在引用链中。
         # 修改方式：仅保存 weakref.ref，使用时再解引用，避免 Response → app → state 的循环引用。
@@ -62,6 +63,7 @@ class LoggingStreamingResponse(Response):
         current_info = self.current_info
         logging_iterator = self._logging_iterator()
         response_chunks = []
+        streamed_bytes = 0
         remaining = 100 * 1024
         should_save = current_info.get("raw_data_expires_at") is not None
         try:
@@ -83,6 +85,7 @@ class LoggingStreamingResponse(Response):
                     await send({
                         "type": "http.response.body", "body": chunk, "more_body": True,
                     })
+                    streamed_bytes += len(chunk)
                     # 正常帧和错误帧走同一记录入口，只保存 send 成功返回的字节。
                     if should_save and remaining:
                         prefix = chunk[:remaining]
@@ -111,6 +114,17 @@ class LoggingStreamingResponse(Response):
                         current_info["response_body"] = truncate_for_logging(b"".join(response_chunks))
                     if "start_time" in current_info:
                         current_info["process_time"] = time() - current_info["start_time"]
+                    # ponytail: 无 usage 时仅按输入字符/4、已发送帧字节/32粗估；需要精确值时依赖上游 usage。
+                    if (current_info.get("_stream_committed") and not self._has_real_usage
+                            and not any(current_info.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens"))):
+                        has_output = current_info.get("_stream_has_output")
+                        if has_output or current_info.get("status_code") == 499:
+                            prompt = int(current_info.get("_estimated_prompt_tokens") or 0)
+                            completion = max(1, streamed_bytes // 32) if has_output and streamed_bytes else 0
+                            if prompt or completion:
+                                current_info.update(prompt_tokens=prompt, completion_tokens=completion,
+                                                    total_tokens=prompt + completion, _usage_estimated=True,
+                                                    prompt_price=0.0, completion_price=0.0)
                     # 渠道统计必须等待真实流结束，不能在创建 Response 时提前记成功。
                     channel_stats = current_info.pop("_channel_stats_call", None)
                     if channel_stats:
@@ -199,6 +213,10 @@ class LoggingStreamingResponse(Response):
             from core.dialects.passthrough import parse_passthrough_usage
             usage_info = parse_passthrough_usage(resp)
 
+        if usage_info or any(isinstance(value, dict) and value for value in (
+                resp.get("usage"), resp.get("usageMetadata"),
+                safe_get(resp, "message", "usage", default=None), safe_get(resp, "response", "usage", default=None))):
+            self._has_real_usage = True
         if usage_info:
             # usage 解析同时覆盖普通 token 与 Prompt Caching 字段，保证透传流式响应也能入库缓存统计。
             for _usage_key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_creation_tokens"):

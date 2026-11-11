@@ -62,7 +62,7 @@ _RT_DISABLED_FILE = _os.path.join(
 _rt_save_lock = _threading.Lock()
 
 
-def _save_all_auto_disabled():
+def save_all_auto_disabled():
     """将所有渠道的运行时自动禁用状态持久化到 JSON 文件。"""
     try:
         snapshot = {}
@@ -86,6 +86,9 @@ def _save_all_auto_disabled():
             _os.replace(tmp, _RT_DISABLED_FILE)
     except Exception as e:
         logger.debug(f"[auto_disable_persist] save failed: {e}")
+
+
+_save_all_auto_disabled = save_all_auto_disabled
 
 
 def load_auto_disabled_snapshot() -> dict:

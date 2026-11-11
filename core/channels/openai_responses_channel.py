@@ -567,7 +567,7 @@ async def _sse_event_iter(response):
             yield data
 
 
-async def _responses_events_to_sse(events, model):
+async def responses_events_to_sse(events, model):
     """
     Responses API 事件流 → Chat Completions SSE 的共用转换器。
 
@@ -857,7 +857,7 @@ async def fetch_responses_stream(client, url, headers, payload, model, timeout):
             yield error_message
             return
 
-        async for sse_string in _responses_events_to_sse(_sse_event_iter(response), model):
+        async for sse_string in responses_events_to_sse(_sse_event_iter(response), model):
             yield sse_string
 
 
@@ -972,3 +972,6 @@ def register():
         preference_toggles=[WS_PREFERENCE_TOGGLE],
         source="builtin",
     )
+
+
+_responses_events_to_sse = responses_events_to_sse

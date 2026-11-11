@@ -15,6 +15,8 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from core.auth import verify_admin_api_key
+from core.initialization import ensure_initialized, get_admin_user
 from core.jwt_utils import issue_jwt, decode_jwt
 from core.security import verify_password
 from routes.deps import rate_limit_dependency, get_app
@@ -30,16 +32,9 @@ _login_failures_by_ip: dict[str, list[float]] = defaultdict(list)
 
 
 def _extract_login_client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        # 过滤尾部空项，避免 "1.2.3.4, " 这类头部回退到未校验的 X-Real-IP。
-        ips = [ip.strip() for ip in xff.split(",") if ip.strip()]
-        if ips:
-            return ips[-1]
-    xri = request.headers.get("x-real-ip")
-    if xri and xri.strip():
-        return xri.strip()
-    return request.client.host if request.client else "unknown"
+    from core.http_headers import extract_client_ip
+    client = getattr(request, "client", None)
+    return extract_client_ip(getattr(request, "headers", None), getattr(client, "host", None))
 
 
 def _check_login_rate_limit(client_ip: str) -> None:
@@ -94,58 +89,22 @@ class MeResponse(BaseModel):
 
 
 def _select_admin_api_key_from_config(conf: dict) -> Optional[str]:
-    api_keys = conf.get("api_keys") or []
-    if not isinstance(api_keys, list):
-        return None
+    from core.auth import compute_admin_api_keys
 
-    for item in api_keys:
-        if not isinstance(item, dict):
-            continue
-        if "admin" in str(item.get("role", "")):
-            key = item.get("api")
-            if key:
-                return str(key)
-
-    if api_keys and isinstance(api_keys[0], dict) and api_keys[0].get("api"):
-        return str(api_keys[0]["api"])
-
-    return None
+    admin_keys = compute_admin_api_keys(conf.get("api_keys") or [])
+    return admin_keys[0] if admin_keys else None
 
 
 @router.post("/login", response_model=LoginResponse, dependencies=[Depends(rate_limit_dependency)])
-async def login(request: Request, payload: LoginRequest = Body(...)):
-    client_ip = _extract_login_client_ip(request)
-    _check_login_rate_limit(client_ip)
-
+async def login(request: Request = None, payload: LoginRequest = Body(...)):
     if DISABLE_DATABASE:
         raise HTTPException(status_code=500, detail="Database is disabled; cannot login.")
 
-    async with async_session_scope() as db:
-        if (DB_TYPE or "sqlite").lower() == "d1":
-            row = await db.query_one(
-                "SELECT id, username, password_hash, jwt_secret FROM admin_user WHERE id = ?",
-                [1],
-            )
-            admin_user = (
-                AdminUser(
-                    id=int(row.get("id") or 1),
-                    username=str(row.get("username") or ""),
-                    password_hash=str(row.get("password_hash") or ""),
-                    jwt_secret=row.get("jwt_secret"),
-                ) if row else None
-            )
-        else:
-            admin_user = await db.get(AdminUser, 1)
+    client_ip = _extract_login_client_ip(request)
+    _check_login_rate_limit(client_ip)
 
-    # 若没有显式配置 JWT_SECRET，则优先使用 DB 中持久化的 jwt_secret
-    try:
-        from core.jwt_utils import set_jwt_secret
-
-        if not (os.getenv("JWT_SECRET") or "").strip():
-            if admin_user is not None and getattr(admin_user, "jwt_secret", None):
-                set_jwt_secret(str(admin_user.jwt_secret))
-    except Exception:
-        pass
+    await ensure_initialized(get_app())
+    admin_user = await get_admin_user()
 
     if admin_user is None:
         raise HTTPException(status_code=404, detail="Admin user not initialized. Please visit /setup.")
@@ -159,7 +118,6 @@ async def login(request: Request, payload: LoginRequest = Body(...)):
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
     _login_failures_by_ip.pop(client_ip, None)
-
     token = issue_jwt({"sub": admin_user.username, "role": "admin"})
 
     # admin_api_key 仅用于前端展示/兼容旧鉴权；配置权威来自 api.yaml（app.state.config）
@@ -167,19 +125,14 @@ async def login(request: Request, payload: LoginRequest = Body(...)):
     conf = getattr(app.state, "config", None) or {}
     admin_api_key = _select_admin_api_key_from_config(conf)
 
-    # 同步内存标记：已初始化
-    app.state.needs_setup = False
-
     return LoginResponse(access_token=token, admin_api_key=admin_api_key)
 
 
 @router.get("/me", response_model=MeResponse, dependencies=[Depends(rate_limit_dependency)])
 async def me(request: Request):
-    auth = request.headers.get("Authorization") or ""
-    token = auth.split(" ", 1)[1].strip() if auth.startswith("Bearer ") else ""
-
+    token = await verify_admin_api_key(request, None)
     payload = decode_jwt(token)
-    if not payload:
+    if not payload or str(payload.get("role", "")).lower() != "admin":
         raise HTTPException(status_code=403, detail="Invalid or expired token")
 
     role = str(payload.get("role", "user"))

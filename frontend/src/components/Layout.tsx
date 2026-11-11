@@ -308,8 +308,8 @@ export default function Layout() {
             {currentLabel}
           </h2>
         </header>
-        <main className="flex-1 overflow-auto p-4 md:p-8 bg-muted/20">
-          <div className="max-w-6xl mx-auto h-full">
+        <main id="app-main-scroll" className="flex-1 overflow-auto p-4 md:p-8 bg-muted/20">
+          <div className="max-w-7xl mx-auto min-h-full">
             <Outlet />
           </div>
         </main>

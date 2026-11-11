@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 # Gemini 工具函数
 # ============================================================
 
-def _is_image_model(model_name: str) -> bool:
+def is_image_model(model_name: str) -> bool:
     """判断模型是否为图片生成模型（基于模型名约定）"""
     name = model_name.lower()
     return "-image" in name or "image-generation" in name
@@ -116,7 +116,7 @@ async def patch_passthrough_gemini_payload(
         model_dict = get_model_dict(provider)
         req_model = getattr(request, "model", "") or ""
         original_model = model_dict.get(req_model, req_model)
-        if any(off_model in original_model for off_model in gemini_max_token_65k_models) or _is_image_model(original_model):
+        if any(off_model in original_model for off_model in gemini_max_token_65k_models) or is_image_model(original_model):
             safety_threshold = "OFF"
         else:
             safety_threshold = "BLOCK_NONE"
@@ -694,7 +694,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     if system_prompt.strip():
         systemInstruction = {"parts": [{"text": system_prompt}]}
 
-    if any(off_model in original_model for off_model in gemini_max_token_65k_models) or _is_image_model(original_model):
+    if any(off_model in original_model for off_model in gemini_max_token_65k_models) or is_image_model(original_model):
         safety_settings = "OFF"
     else:
         safety_settings = "BLOCK_NONE"
@@ -767,7 +767,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
 
     for field, value in request.model_dump(exclude_unset=True).items():
         if field not in miss_fields and value is not None:
-            if field == "tools" and ("gemini-2.0-flash-thinking" in original_model or _is_image_model(original_model)):
+            if field == "tools" and ("gemini-2.0-flash-thinking" in original_model or is_image_model(original_model)):
                 continue
             if field == "tools":
                 # 处理每个工具的 function 定义
@@ -823,7 +823,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                         "tool_config": tool_config
                     })
             elif field == "temperature":
-                if _is_image_model(original_model):
+                if is_image_model(original_model):
                     value = 1
                 generation_config["temperature"] = value
             elif field == "max_tokens" or field == "max_completion_tokens":
@@ -850,7 +850,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
     if "maxOutputTokens" not in generation_config:
         payload["generationConfig"]["maxOutputTokens"] = 32768
 
-        if _is_image_model(original_model):
+        if is_image_model(original_model):
             payload["generationConfig"]["responseModalities"] = [
                 "Text",
                 "Image",
@@ -891,7 +891,7 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
             # 合并到 generationConfig 中（extra_body.google.thinking_config -> generationConfig.thinkingConfig）
             _deep_merge(payload["generationConfig"], converted_config)
 
-    if "gemini-2.5" in original_model and not _is_image_model(original_model):
+    if "gemini-2.5" in original_model and not is_image_model(original_model):
         # 从请求模型名中检测思考预算设置
         m = re.match(r".*-think-(-?\d+)", request.model)
         if m:
@@ -1154,10 +1154,10 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
         has_function_call = bool(function_calls_list)
         has_image = image_base64 is not None
         
-        is_image_model = _is_image_model(model)
+        image_model = is_image_model(model)
         
         # 图像模型必须有图片
-        if is_image_model and not has_image:
+        if image_model and not has_image:
             yield {
                 "error": "Gemini image generation failed: no image was generated",
                 "status_code": 502,
@@ -1166,7 +1166,7 @@ async def fetch_gemini_response(client, url, headers, payload, model, timeout):
             return
         
         # 普通模型必须有内容
-        if not is_image_model and not has_content and not has_reasoning and not has_function_call:
+        if not image_model and not has_content and not has_reasoning and not has_function_call:
             yield {
                 "error": "Gemini returned empty response",
                 "status_code": 502,
@@ -1341,7 +1341,7 @@ async def fetch_gemini_response_stream(client, url, headers, payload, model, tim
                 yield sse_string
 
             if image_base64:
-                if not _is_image_model(model):
+                if not is_image_model(model):
                     pass # Ignored base64 from non-image model in streaming mode, usually duplicate or not supported by standard SSE
                 else:
                     image_size_mb = len(image_base64) * 3 / 4 / (1024 * 1024)
@@ -1447,9 +1447,9 @@ async def fetch_gemini_response_stream(client, url, headers, payload, model, tim
 
         # 检查图像生成模型是否实际返回了图片
         # 对于 image 模型，如果只有思维链但没有图片，视为生成失败
-        is_image_model = _is_image_model(model)
+        image_model = is_image_model(model)
         
-        if is_image_model and not has_image:
+        if image_model and not has_image:
             # 图像生成模型但没有生成图片
             error_detail = {
                 "reason": "no_image_generated",
@@ -1467,7 +1467,7 @@ async def fetch_gemini_response_stream(client, url, headers, payload, model, tim
             return
         
         # 检查普通模型是否返回了有效内容
-        if not is_image_model and not has_content and not has_reasoning and not has_function_call:
+        if not image_model and not has_content and not has_reasoning and not has_function_call:
             logger.warning(f"[Gemini] Empty response: no content, reasoning, or function call")
             yield {
                 "error": "Gemini returned empty response",
@@ -1633,3 +1633,6 @@ def register():
         models_adapter=fetch_gemini_models,
         source="builtin",
     )
+
+
+_is_image_model = is_image_model

@@ -399,7 +399,7 @@ async def test_cancel_during_inbound_body_balances_metrics(monkeypatch):
 
     m = StatsMiddleware(app)
     m._dialect_prefixes = ["/v1"]
-    fake = SimpleNamespace(state=SimpleNamespace(config={}))
+    fake = SimpleNamespace(state=SimpleNamespace(config={}, admin_initialized=True, api_list=['fake-installed-key']))
     scope = {"type": "http", "path": "/v1/chat/completions", "method": "POST", "headers": [(b"content-type", b"application/json")], "app": fake}
     task = asyncio.create_task(m(scope, receive, send))
     await started.wait()

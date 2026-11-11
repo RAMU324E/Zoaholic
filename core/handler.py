@@ -47,7 +47,7 @@ from core.models import (
     ModerationRequest,
     EmbeddingRequest,
 )
-from core.utils import get_engine, provider_api_circular_list, truncate_for_logging, is_local_api_key
+from core.utils import get_engine, provider_api_circular_list, truncate_for_logging, is_local_api_key, is_valid_model_name, scrub_sensitive_error_text
 from core.routing import get_right_order_providers
 from core.byok import get_byok_real_key, get_byok_template_key, is_byok_provider
 from core.error_response import openai_error_response
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 # 默认超时时间（10分钟，支持长时间 reasoning 请求）
 # 默认超时时间（10分钟，支持长时间 reasoning 请求）
 DEFAULT_TIMEOUT = 600
+DEFAULT_STREAM_HEADER_TIMEOUT = 60
 
 # 调试模式标志
 is_debug = False
@@ -418,6 +419,23 @@ def normalize_keepalive_interval(keepalive_interval: Any, timeout_value: Any) ->
     return interval
 
 
+def normalize_stream_header_timeout(header_timeout: Any, timeout_value: Any) -> Optional[float]:
+    """把流式响应头/首包超时规范化为正数秒数（支持 int/float，<=0 表示禁用）。"""
+    try:
+        ht = float(header_timeout)
+    except (TypeError, ValueError):
+        return None
+    if ht <= 0:
+        return None
+    try:
+        timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    if timeout > 0 and ht > timeout:
+        return timeout
+    return int(ht) if ht.is_integer() else ht
+
+
 class ModelRequestHandler:
     """
     模型请求处理器
@@ -579,6 +597,20 @@ class ModelRequestHandler:
         """
         config = self.app.state.config
         request_model_name = request_data.model
+        if not is_valid_model_name(request_model_name):
+            raise HTTPException(status_code=400, detail="Invalid model name")
+
+        request_total_tokens = 0
+        if isinstance(request_data, RequestModel):
+            for message in request_data.messages:
+                if isinstance(message.content, str):
+                    request_total_tokens += len(message.content)
+                elif isinstance(message.content, list):
+                    request_total_tokens += sum(len(part.text or "") for part in message.content)
+        request_total_tokens //= 4
+        current_info_for_estimate = self.request_info_getter()
+        if current_info_for_estimate is not None:
+            current_info_for_estimate["_estimated_prompt_tokens"] = request_total_tokens
 
         # ── override 模式：跳过用户限速和全局路由（测试/直接调用场景） ──
         if override_providers is not None:
@@ -596,6 +628,11 @@ class ModelRequestHandler:
             # ── 正常路径：用户限速 + 全局路由 ──
             try:
                 final_api_key = self.app.state.api_list[api_index]
+                from core.middleware import request_info
+                from core.key_hierarchy import snapshot_key_ancestry
+                info = request_info.get()
+                if info is not None:
+                    snapshot_key_ancestry(info, config['api_keys'][api_index])
                 # 修改原因：Phase 2 quota 需要在旧 user_api_keys_rate_limit 消耗前检查用户 key 的统一配额。
                 # 修改方式：仅对已配置 quota 的 final_api_key 调用 quota_registry.check，并传入当前模型与 request_info 中的 client_ip。
                 # 目的：让统一配额负责用户 key 的请求、token、cost、IP 维度控制，同时保留旧 next() 作为上游 key 限速层。
@@ -604,6 +641,8 @@ class ModelRequestHandler:
                     from core.middleware import request_info
                     _ri = request_info.get()
                     _client_ip = _ri.get('client_ip', '') if _ri else ''
+                    if quota_registry.is_exhausted(final_api_key):
+                        raise HTTPException(status_code=429, detail="Quota exhausted, please check your account.")
                     reject_reason = quota_registry.check(final_api_key, request_model_name, client_ip=_client_ip)
                     if reject_reason:
                         raise HTTPException(status_code=429, detail=reject_reason)
@@ -631,13 +670,6 @@ class ModelRequestHandler:
                 config, 'api_keys', api_index, "preferences", "SCHEDULING_ALGORITHM",
                 default=safe_get(config, "preferences", "SCHEDULING_ALGORITHM", default="fixed_priority")
             )
-
-            request_total_tokens = 0
-            if request_data and isinstance(request_data, RequestModel):
-                for message in request_data.messages:
-                    if message.content and isinstance(message.content, str):
-                        request_total_tokens += len(message.content)
-            request_total_tokens = int(request_total_tokens / 4)
 
             matching_providers = await get_right_order_providers(
                 request_model_name, config, api_index, scheduling_algorithm, 
@@ -769,6 +801,7 @@ class ModelRequestHandler:
 
         # 初始化重试路径记录
         retry_path: List[Dict[str, Any]] = []
+        error_secrets = [byok_real_key, force_api_key]
         current_retry_count = 0
         # 修改原因：虚拟路由内 key 冷却时间短于重试循环耗时时，cooldown 过期 →
         #   is_all_rate_limited False → 再次尝试 → 失败 → index 被 grp_start 重置 → 无限循环。
@@ -952,6 +985,51 @@ class ModelRequestHandler:
             if is_local_api_key(provider_name):
                 keepalive_interval = None
 
+            # 解析流式响应头/首包超时（支持全局与单渠道/模型覆盖，默认 60s，与 keepalive_interval 解耦）
+            stream_header_timeout = None
+            sh_table = getattr(self.app.state, "stream_header_timeouts", None)
+            prov_prefs = safe_get(provider, "preferences", default=None) or {}
+            global_prefs = safe_get(getattr(self.app.state, "config", None), "preferences", default=None) or {}
+            has_explicit_sh = any(
+                isinstance(d, dict) and (d.get("stream_header_timeout") is not None or d.get("header_timeout") is not None)
+                for d in (prov_prefs, global_prefs)
+            )
+            if sh_table is not None:
+                stream_header_timeout = get_preference(
+                    sh_table, provider_name, original_request_model, DEFAULT_STREAM_HEADER_TIMEOUT
+                )
+            elif has_explicit_sh:
+                raw_sh = (
+                    prov_prefs.get("stream_header_timeout")
+                    if prov_prefs.get("stream_header_timeout") is not None
+                    else prov_prefs.get("header_timeout")
+                )
+                if raw_sh is None:
+                    raw_sh = (
+                        global_prefs.get("stream_header_timeout")
+                        if global_prefs.get("stream_header_timeout") is not None
+                        else global_prefs.get("header_timeout")
+                    )
+                if isinstance(raw_sh, dict):
+                    stream_header_timeout = get_preference_value(raw_sh, request_model_name)
+                    if stream_header_timeout is None:
+                        stream_header_timeout = get_preference_value(raw_sh, original_model)
+                    if stream_header_timeout is None:
+                        stream_header_timeout = raw_sh.get("default", DEFAULT_STREAM_HEADER_TIMEOUT)
+                else:
+                    stream_header_timeout = raw_sh
+            stream_header_timeout = normalize_stream_header_timeout(stream_header_timeout, local_timeout_value)
+            if is_local_api_key(provider_name):
+                stream_header_timeout = None
+            try:
+                _cur_info_sh = self.request_info_getter()
+                if isinstance(_cur_info_sh, dict):
+                    _cur_info_sh["_stream_header_timeout"] = stream_header_timeout
+            except Exception:
+                pass
+
+            # 此次取 Key 前的失败不能继承上一次渠道的凭据。
+            (self.request_info_getter() or {}).pop("_used_api_key", None)
             try:
                 passthrough_ctx = None
                 if dialect_id and original_payload is not None and isinstance(attempt_request_data, RequestModel):
@@ -980,6 +1058,8 @@ class ModelRequestHandler:
                 process_extra_kwargs: Dict[str, Any] = {
                     "force_api_key": effective_force_api_key,
                 }
+                if _callable_accepts_keyword(process_fn, "stream_header_timeout"):
+                    process_extra_kwargs["stream_header_timeout"] = stream_header_timeout
                 # 修改原因：响应出站阶段需要把 Key 信息传入真实 process_request，但测试替身可能不接受新增参数。
                 # 修改方式：仅当当前 process_fn 签名支持时才附加 api_key_info 和 key_enabled_plugins。
                 # 目的：在不破坏既有测试替身的同时，把生产请求所需上下文传给响应处理链。
@@ -1038,17 +1118,22 @@ class ModelRequestHandler:
                 else:
                     full_error = str(e)
 
+                error_secrets = [byok_real_key, force_api_key,
+                                 (self.request_info_getter() or {}).get("_used_api_key")]
                 retry_path.append({
                     "provider": provider_name,
-                    "error": full_error[:2000],  # 增加错误信息长度限制到 2000 字符
+                    "error": scrub_sensitive_error_text(full_error, error_secrets)[:2000],
                     "status_code": None  # 稍后更新
                 })
 
                 # 根据异常类型设置状态码和错误消息
                 if isinstance(e, httpx.ReadTimeout):
                     status_code = 504  # Gateway Timeout
-                    timeout_value = e.request.extensions.get('timeout', {}).get('read', -1)
-                    error_message = f"Request timed out after {timeout_value} seconds"
+                    request_obj = getattr(e, "_request", None)
+                    timeout_value = (request_obj.extensions.get('timeout', {}).get('read', -1)
+                                     if request_obj is not None else (stream_header_timeout or local_timeout_value))
+                    error_message = (str(e) if "Stream header/first-byte timeout" in str(e)
+                                     else f"Request timed out after {timeout_value} seconds")
                 elif isinstance(e, httpx.ConnectError):
                     status_code = 503  # Service Unavailable
                     error_message = "Unable to connect to service"
@@ -1092,9 +1177,9 @@ class ModelRequestHandler:
                         provider.get('provider', '?'),
                         request_model_name,
                         type(e).__name__,
-                        error_message[:300],
+                        scrub_sensitive_error_text(error_message, error_secrets)[:300],
                         exc_info=True,
-                        extra={"sensitive_keys": (byok_real_key, self.request_info_getter().get("_used_api_key"))},
+                        extra={"sensitive_keys": error_secrets},
                     )
 
                 # ── CDN/WAF 误判修正 ──
@@ -1112,7 +1197,7 @@ class ModelRequestHandler:
                     )):
                         logger.info(
                             f"[cdn_403_fix] Remapping CDN {status_code}→502 for provider {provider.get('provider','?')}, "
-                            f"error starts with: {error_message[:80]!r}"
+                            f"error starts with: {scrub_sensitive_error_text(error_message, error_secrets)[:80]!r}"
                         )
                         status_code = 502
 
@@ -1282,13 +1367,13 @@ class ModelRequestHandler:
                     status_code = 429
 
                 # 仅用不可逆指纹定位 Key；显式传入本次凭据，连 BYOK 错误正文/堆栈一起脱敏。
-                log_secrets = {"sensitive_keys": (current_api, byok_real_key)}
+                log_secrets = {"sensitive_keys": error_secrets}
                 logger.error(
-                    f"Error {status_code} with provider {channel_id} API key: {key_fingerprint(current_api)}: {error_message}",
+                    f"Error {status_code} with provider {channel_id} API key: {key_fingerprint(current_api)}: {scrub_sensitive_error_text(error_message, error_secrets)}",
                     extra=log_secrets,
                 )
                 import traceback
-                logger.error(f"[traceback] {traceback.format_exc()}", extra=log_secrets)
+                logger.error(f"[traceback] {scrub_sensitive_error_text(traceback.format_exc(), error_secrets)}", extra=log_secrets)
 
                 # 更新重试路径中的状态码
                 if retry_path:
@@ -1382,7 +1467,7 @@ class ModelRequestHandler:
                 # 目的：让不重试失败路径不再增加后台协程数量，同时保留失败统计。
                 enqueue_stats(current_info, app=self.app)
                 error_response = openai_error_response(
-                    f"Error: Current provider response failed: {error_message}",
+                    f"Error: Current provider response failed: {scrub_sensitive_error_text(error_message, error_secrets)}",
                     status_code,
                 )
                 try:
@@ -1423,7 +1508,7 @@ class ModelRequestHandler:
         # 目的：保留重试耗尽后的失败日志，同时避免请求结束阶段阻塞事件循环。
         enqueue_stats(current_info, app=self.app)
         error_response = openai_error_response(
-            f"All {request_data.model} error: {error_message}",
+            f"All {request_data.model} error: {scrub_sensitive_error_text(error_message, error_secrets)}",
             status_code,
         )
         try:
@@ -1440,3 +1525,9 @@ class ModelRequestHandler:
             provider_enabled_plugins,
             _key_enabled_plugins,
         )
+
+
+resolve_oauth_api_key = _resolve_oauth_api_key
+
+
+fire_and_forget_channel_stats = _fire_and_forget_channel_stats

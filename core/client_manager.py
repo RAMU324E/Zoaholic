@@ -94,6 +94,7 @@ class ClientManager:
 
                     client_config = {
                         **self.default_config,
+                        "follow_redirects": False,
                         "timeout": timeout,
                         "limits": limits,
                     }

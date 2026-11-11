@@ -77,20 +77,13 @@ def _collect_key_candidates(raw_keys: Any) -> list[str]:
 
 def _get_test_model_name(test_config: Dict[str, Any]) -> str:
     """读取测试请求模型名，优先使用内部已解析模型名。"""
-    # 修改原因：model_prefix 渠道可能需要把前端传入的无前缀模型名解析为带前缀的外部模型名。
-    # 修改方式：provider 构建阶段可写入 _resolved_test_model，请求构建阶段优先读取它。
-    # 目的：在不改变公开请求体格式的前提下，让拆分后的 provider 构建和 request 构建共享解析结果。
-    model = (
-        test_config.get("_resolved_test_model")
-        or test_config.get("model")
-        or test_config.get("model_alias")
-        or test_config.get("upstream_model")
-        or ""
-    )
-    model = str(model).strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="model 是必填项")
-    return model
+    for key in ("_resolved_test_model", "model", "model_alias", "upstream_model"):
+        raw = test_config.get(key)
+        if raw is not None:
+            model = str(raw).strip()
+            if model:
+                return model
+    raise HTTPException(status_code=400, detail="model 是必填项")
 
 
 def _get_upstream_model_hint(test_config: Dict[str, Any]) -> Optional[str]:
@@ -393,12 +386,8 @@ async def _extract_test_result(response: Any, start_time: float) -> Dict[str, An
 @router.get("/v1/playground/keys", dependencies=[Depends(rate_limit_dependency)])
 async def get_playground_keys(token: str = Depends(verify_admin_api_key)):
     """返回 Playground 可切换的全局用户 API Key 列表。"""
-    # 修改原因：Playground Key 选择需要模拟不同 api.yaml 用户身份，而不是指定 provider 上游密钥。
-    # 修改方式：只读取全局 api_keys，返回显示名、脱敏文本和完整 api；该端点仍由管理员认证保护。
-    # 目的：让 chat 和 models 请求都能用所选用户的 Bearer token 重新鉴权，并解除 Key 列表与 model 的耦合。
-    _ = token
     app = get_app()
-    config = getattr(getattr(app, "state", None), "config", None) or {}
+    config = getattr(app.state, "config", None) or {}
     api_keys = config.get("api_keys") or []
 
     keys = []
@@ -917,7 +906,7 @@ def _oauth_quota_to_balance_result(quota: Any, error: Optional[str] = None) -> D
 def _append_quota_snapshot_fields(result: Dict[str, Any]) -> Dict[str, Any]:
     """在旧 BalanceResult 响应上追加 QuotaSnapshot 新字段。"""
     # 修改原因：/v1/channels/balance 需要继续返回旧字段，同时让前端可以开始读取统一 quota 字段。
-    # 修改方式：在所有返回分支末尾把旧结果转成 QuotaSnapshot，只追加 gauges、badges、metrics、extensions 四类新字段。
+    # 修改方式：追加 gauges、metrics、extensions，并为旧客户端保留 badges 空列表。
     # 目的：不改变现有余额查询逻辑和旧字段含义，降低 P0 接入风险。
     if not isinstance(result, dict):
         return result
@@ -927,7 +916,6 @@ def _append_quota_snapshot_fields(result: Dict[str, Any]) -> Dict[str, Any]:
     balance_snapshot = from_balance_result(result)
     if result.get("quota_inner") is not None or result.get("quota_outer") is not None:
         snapshot = from_oauth_account(result)
-        snapshot.badges.extend(balance_snapshot.badges)
         if not snapshot.gauges:
             snapshot.gauges.extend(balance_snapshot.gauges)
     else:
@@ -1006,7 +994,7 @@ async def _query_oauth_channel_balance(app: Any, provider: Dict[str, Any]) -> Di
             for key_id in key_ids
         })
 
-    oauth_manager = getattr(getattr(app, "state", None), "oauth_manager", None)
+    oauth_manager = getattr(app.state, "oauth_manager", None) if app is not None else None
     fetch_quota = getattr(oauth_manager, "fetch_quota", None)
     if not callable(fetch_quota):
         return _aggregate_oauth_balance_results({

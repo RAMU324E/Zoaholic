@@ -27,6 +27,8 @@ import base64
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import HTTPException
+
 from core.log_config import logger
 from core.plugins import (
     register_request_interceptor,
@@ -185,8 +187,16 @@ def _guess_lang(filename: str, mime: str) -> str:
     return ""
 
 
+MAX_FILE_BASE64_CHARS = 8 * 1024 * 1024
+MAX_DECODED_TEXT_BYTES = 5 * 1024 * 1024
+
+
 def _decode_content(data_str: str, mime: str = "") -> Optional[str]:
-    """从 base64 / data URI 解码文本内容"""
+    """从 base64 / data URI 解码文本内容，超限明确拒绝而不是保留原文件。"""
+    if not isinstance(data_str, str) or not data_str:
+        return None
+    if len(data_str) > MAX_FILE_BASE64_CHARS:
+        raise HTTPException(status_code=413, detail="Inline file encoded content too large")
     try:
         # data URI: data:mime;base64,xxxxx
         if data_str.startswith("data:"):
@@ -196,10 +206,15 @@ def _decode_content(data_str: str, mime: str = "") -> Optional[str]:
             else:
                 # 可能是 data:text/plain,xxxxx（非 base64）
                 _, _, content = data_str.partition(",")
+                if len(content.encode("utf-8")) > MAX_DECODED_TEXT_BYTES:
+                    raise HTTPException(status_code=413, detail="Inline file decoded content too large")
                 return content
         else:
             # 纯 base64
             raw = base64.b64decode(data_str)
+
+        if len(raw) > MAX_DECODED_TEXT_BYTES:
+            raise HTTPException(status_code=413, detail="Inline file decoded content too large")
 
         # 尝试 UTF-8 解码
         try:
@@ -210,6 +225,8 @@ def _decode_content(data_str: str, mime: str = "") -> Optional[str]:
                 return raw.decode("latin-1")
             except Exception:
                 return None
+    except HTTPException:
+        raise
     except Exception:
         return None
 

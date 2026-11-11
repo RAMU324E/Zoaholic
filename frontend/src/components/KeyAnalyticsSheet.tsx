@@ -19,7 +19,8 @@ import { apiFetch } from '../lib/api';
 interface KeyAnalyticsSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  apiKeyValue: string;
+  apiKeyValue?: string;
+  apiKeyHash?: string;
   apiKeyName?: string;
 }
 
@@ -288,7 +289,7 @@ async function keyHash(apiKey: string): Promise<string> {
 
 // ========== Component ==========
 
-export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName }: KeyAnalyticsSheetProps) {
+export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyHash, apiKeyName }: KeyAnalyticsSheetProps) {
   const [timeRange, setTimeRange] = useState(24);
   const [loading, setLoading] = useState(false);
 
@@ -304,10 +305,10 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName 
   const [ipDetailLoading, setIpDetailLoading] = useState<string | null>(null);
   const [ipDetailErrors, setIpDetailErrors] = useState<Record<string, string>>({});
 
-  const displayName = apiKeyName || (apiKeyValue ? `${apiKeyValue.slice(0, 8)}...${apiKeyValue.slice(-4)}` : '—');
+  const displayName = apiKeyName || (apiKeyValue ? `${apiKeyValue.slice(0, 8)}...${apiKeyValue.slice(-4)}` : (apiKeyHash || '—'));
 
   const fetchAll = useCallback(async () => {
-    if (!apiKeyValue) return;
+    if (!apiKeyHash && !apiKeyValue) return;
 
     // 修改原因：切换 Key 或时间范围时，旧数据会短暂残留在侧滑面板中。
     // 修改方式：每次请求前先清空组件状态，再并发拉取 summary 和 detail 两个接口。
@@ -325,7 +326,7 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName 
     setIpDetailErrors({});
 
     try {
-      const hash = await keyHash(apiKeyValue);
+      const hash = apiKeyHash || await keyHash(apiKeyValue || '');
       const granularity = timeRange > 48 ? 'day' : 'hour';
 
       const [summaryRes, detailRes] = await Promise.all([
@@ -354,10 +355,10 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName 
     } finally {
       setLoading(false);
     }
-  }, [apiKeyValue, timeRange]);
+  }, [apiKeyHash, apiKeyValue, timeRange]);
 
   const toggleIpDetail = useCallback(async (ip?: string | null) => {
-    if (!ip) return;
+    if (!ip || (!apiKeyHash && !apiKeyValue)) return;
     if (expandedIp === ip) {
       setExpandedIp(null);
       return;
@@ -373,7 +374,7 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName 
       return next;
     });
     try {
-      const hash = await keyHash(apiKeyValue);
+      const hash = apiKeyHash || await keyHash(apiKeyValue || '');
       const granularity = timeRange > 48 ? 'day' : 'hour';
       const params = new URLSearchParams({
         ip,
@@ -395,13 +396,13 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyName 
     } finally {
       setIpDetailLoading(current => current === ip ? null : current);
     }
-  }, [apiKeyValue, expandedIp, ipDetailLoading, ipDetails, timeRange]);
+  }, [apiKeyHash, apiKeyValue, expandedIp, ipDetailLoading, ipDetails, timeRange]);
 
   useEffect(() => {
-    if (open && apiKeyValue) {
+    if (open && (apiKeyHash || apiKeyValue)) {
       fetchAll();
     }
-  }, [open, apiKeyValue, timeRange, fetchAll]);
+  }, [open, apiKeyHash, apiKeyValue, timeRange, fetchAll]);
 
   const totalRequestsFromDetail = useMemo(
     () => modelData.reduce((sum, entry) => sum + toNumber(entry.request_count), 0),

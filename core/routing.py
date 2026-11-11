@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Any, TYPE_CHECKING
 
 from fastapi import HTTPException
 
-from core.api_key_access import is_admin_api_key
 from core.log_config import logger
+from core.api_key_access import is_admin_api_key
 from core.utils import (
     get_model_dict,
     circular_list_encoder,
@@ -87,7 +87,7 @@ def _append_literal_model_rules(
     for provider in config["providers"]:
         if provider.get("enabled") is False:
             continue
-        model_dict = provider["_model_dict_cache"]
+        model_dict = get_model_dict(provider)
         if model_name in model_dict:
             _append_provider_rule(provider_rules, provider["provider"], model_name)
         else:
@@ -98,10 +98,7 @@ def _append_literal_model_rules(
 
 def _is_virtual_model_authorized(request_model: str, config: Dict[str, Any], api_index: int) -> bool:
     """判断当前 API Key 是否允许访问虚拟模型名。"""
-    # 修改原因：虚拟模型只是新的模型名入口，必须复用 API Key 的 model 授权数组。
-    # 修改方式：只接受 "all" 或与虚拟模型名完全相同的 model 规则。
-    # 目的：避免虚拟模型绕过现有 API Key 授权边界。
-    model_rules = safe_get(config, 'api_keys', api_index, 'model', default=[]) or []
+    model_rules = safe_get(config, 'api_keys', api_index, 'model', default=None) or []
     for rule in model_rules:
         if isinstance(rule, dict) and rule:
             rule = next(iter(rule.keys()))
@@ -119,11 +116,9 @@ def _filter_provider_list(
     api_index: int,
 ) -> List[Dict[str, Any]]:
     """复用黑名单和分组过滤逻辑。"""
-    # Administrator keys intentionally bypass user-configurable model/channel/group filters.
-    # Disabled providers have already been removed while building the candidate list.
-    if is_admin_api_key(config, api_index):
+    # Keep local root-admin access; child keys still intersect every ancestor.
+    if is_admin_api_key(config, api_index) and not config['api_keys'][api_index].get('parent_id'):
         return provider_list
-
     # 修改原因：虚拟模型候选池和普通模型候选池都必须经过同一套 API Key 过滤。
     # 修改方式：把 get_matching_providers 中的过滤逻辑抽成独立函数。
     # 目的：让虚拟模型注入点只替换候选池生成，不改变黑名单与分组语义。
@@ -197,7 +192,7 @@ def _filter_provider_list(
     api_key_groups = safe_get(config, 'api_keys', api_index, 'groups', default=['default'])
     if isinstance(api_key_groups, str):
         api_key_groups = [api_key_groups]
-    if not isinstance(api_key_groups, list) or not api_key_groups:
+    if not isinstance(api_key_groups, list):
         api_key_groups = ['default']
     s_key = set(api_key_groups)
 
@@ -319,7 +314,7 @@ async def get_provider_rules(
             # 跳过禁用的渠道
             if provider.get("enabled") is False:
                 continue
-            model_dict = provider["_model_dict_cache"]
+            model_dict = get_model_dict(provider)
             # 识别被重定向的上游原名
             upstream_candidates = {v for k, v in model_dict.items() if v != k}
             # 如果渠道配置了 model_prefix，只返回带前缀的模型名
@@ -328,8 +323,8 @@ async def get_provider_rules(
                 # 跳过通配符标记，"*" 渠道不能在 all 模式下枚举
                 if model == "*":
                     continue
-                # 过滤掉被重定向的上游原名
-                if model in upstream_candidates:
+                # 过滤掉被重定向的上游原名（但若调用方显式请求的就是该模型名则放行）
+                if model in upstream_candidates and model != request_model:
                     continue
                 # 如果有前缀，只返回带前缀的模型名
                 if prefix and not model.startswith(prefix):
@@ -369,7 +364,7 @@ async def get_provider_rules(
                     # 跳过禁用的渠道
                     if provider.get("enabled") is False:
                         continue
-                    model_dict = provider["_model_dict_cache"]
+                    model_dict = get_model_dict(provider)
                     if provider['provider'] == provider_name:
                         models_list.extend(list(model_dict.keys()))
                         matched_provider = provider
@@ -382,7 +377,7 @@ async def get_provider_rules(
                 pool_model = _get_pool_sharing_model_name(
                     matched_provider,
                     request_model,
-                    matched_provider["_model_dict_cache"]
+                    get_model_dict(matched_provider)
                 )
 
             # If the provider name is also the public model namespace (for
@@ -427,7 +422,7 @@ async def get_provider_rules(
             # 跳过禁用的渠道
             if provider.get("enabled") is False:
                 continue
-            model_dict = provider["_model_dict_cache"]
+            model_dict = get_model_dict(provider)
             if model_rule in model_dict.keys():
                 _append_provider_rule(provider_rules, provider["provider"], model_rule)
             else:
@@ -482,7 +477,7 @@ def get_provider_list(
             })
         else:
             for provider in config['providers']:
-                model_dict = provider["_model_dict_cache"]
+                model_dict = get_model_dict(provider)
                 if not model_dict:
                     continue
                 model_name_split = "/".join(item.split("/")[1:])
@@ -516,7 +511,7 @@ def get_provider_list(
                         # 修改原因：pool_sharing 通过带前缀规则命中，但下游请求仍使用用户传入的无前缀模型名。
                         # 修改方式：provider.model 按 {上游原始名: 用户请求名} 构造，缓存按 {用户请求名: 上游原始名} 注入。
                         # 目的：用户看到 deepseek-chat 不变，实际发送给上游的仍是带前缀渠道配置中的原始模型。
-                        shared_model_dict = dict(provider["_model_dict_cache"])
+                        shared_model_dict = dict(get_model_dict(provider))
                         shared_model_dict[request_model] = model_dict[model_name_split]
                         new_provider = {
                             "provider": provider["provider"],
@@ -544,7 +539,7 @@ def get_provider_list(
                             "model": [{model_dict[model_name_split]: request_model}],
                             "preferences": provider.get("preferences", {}),
                             "tools": provider.get("tools", False),
-                            "_model_dict_cache": provider["_model_dict_cache"],
+                            "_model_dict_cache": get_model_dict(provider),
                             "project_id": provider.get("project_id", None),
                             "private_key": provider.get("private_key", None),
                             "client_email": provider.get("client_email", None),
@@ -557,6 +552,9 @@ def get_provider_list(
                         provider_list.append(new_provider)
 
                     elif request_model.endswith("*") and model_name_split.startswith(request_model.rstrip("*")):
+                        # Bind the expanded candidate to its actual upstream model, not the full channel cache.
+                        expanded_model_dict = dict(model_dict)
+                        expanded_model_dict[request_model] = model_dict[model_name_split]
                         new_provider = {
                             "provider": provider["provider"],
                             "base_url": provider.get("base_url", ""),
@@ -564,7 +562,7 @@ def get_provider_list(
                             "model": [{model_dict[model_name_split]: request_model}],
                             "preferences": provider.get("preferences", {}),
                             "tools": provider.get("tools", False),
-                            "_model_dict_cache": provider["_model_dict_cache"],
+                            "_model_dict_cache": expanded_model_dict,
                             "project_id": provider.get("project_id", None),
                             "private_key": provider.get("private_key", None),
                             "client_email": provider.get("client_email", None),
@@ -578,7 +576,7 @@ def get_provider_list(
     return provider_list
 
 
-async def get_matching_providers(
+async def _get_matching_providers_for_key(
     request_model: str,
     config: Dict[str, Any],
     api_index: int,
@@ -626,6 +624,31 @@ async def get_matching_providers(
     
     provider_list = get_provider_list(provider_rules, config, request_model, app)
     return _filter_provider_list(provider_list, request_model, config, api_index)
+
+
+async def get_matching_providers(
+    request_model: str, config: Dict[str, Any], api_index: int, app: "FastAPI",
+    _skip_virtual: bool = False, skip_virtual: bool = False,
+) -> List[Dict[str, Any]]:
+    """Apply existing model/group rules independently at every ancestry level."""
+    from core.key_hierarchy import key_chain
+
+    current = config['api_keys'][api_index]
+    if not current.get('parent_id'):
+        return await _get_matching_providers_for_key(request_model, config, api_index, app, _skip_virtual, skip_virtual)
+    chain = key_chain(config, current['api'])
+    indices = {key['api']: index for index, key in enumerate(config['api_keys'])}
+    candidates = await _get_matching_providers_for_key(
+        request_model, config, api_index, app, _skip_virtual, skip_virtual)
+    for ancestor in chain[1:]:
+        permitted = await _get_matching_providers_for_key(
+            request_model, config, indices[ancestor['api']], app, _skip_virtual, skip_virtual)
+        allowed = {(p['provider'], get_model_dict(p)[request_model]) for p in permitted}
+        candidates = [p for p in candidates
+                      if (p['provider'], get_model_dict(p)[request_model]) in allowed]
+        if not candidates:
+            break
+    return candidates
 
 
 async def get_right_order_providers(

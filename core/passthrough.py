@@ -333,7 +333,7 @@ async def _fetch_passthrough_response(
     yield result
 
 
-async def _passthrough_error_wrapper(generator, channel_id="passthrough", keepalive_interval: Optional[int] = None, *, stream=True, current_info=None, engine=None):
+async def _passthrough_error_wrapper(generator, channel_id="passthrough", keepalive_interval: Optional[int] = None, *, stream=True, current_info=None, engine=None, stream_header_timeout: Optional[float] = None):
     """
     透传模式的简单错误包装器。
 
@@ -342,6 +342,7 @@ async def _passthrough_error_wrapper(generator, channel_id="passthrough", keepal
     if stream:
         from core.stream_pipeline import prepare_stream
         return await prepare_stream(generator, current_info=current_info, keepalive_interval=keepalive_interval,
+                                    stream_header_timeout=stream_header_timeout,
                                     engine=engine)
     from time import time as time_now
     start_time = time_now()
@@ -455,6 +456,7 @@ async def process_request_passthrough(
     force_api_key: Optional[str] = None,
     api_key_info: Optional[Dict[str, Any]] = None,
     key_enabled_plugins: Optional[List[str]] = None,
+    stream_header_timeout: Optional[float] = None,
 ) -> Response:
     """
     透传模式请求处理：
@@ -660,6 +662,9 @@ async def process_request_passthrough(
         payload["stream"] = False
         logger.info(f"[stream_mode/passthrough] force_non_stream: client=stream, upstream=non-stream, model={original_model}")
 
+    if upstream_stream and engine == "openai":
+        payload["stream_options"] = {**(payload.get("stream_options") or {}), "include_usage": True}
+
     # Gemini/Vertex URL 适配
     if upstream_stream and "generateContent" in url and "streamGenerateContent" not in url:
         url = url.replace("generateContent", "streamGenerateContent")
@@ -718,6 +723,7 @@ async def process_request_passthrough(
                 with proxy_context(proxy, require_proxy=require_proxy):
                     wrapped_generator, first_response_time = await _passthrough_error_wrapper(
                         generator, channel_id, keepalive_interval=keepalive_interval,
+                        stream_header_timeout=stream_header_timeout,
                         current_info=current_info,
                         engine=engine,
                     )
@@ -851,3 +857,15 @@ async def process_request_passthrough(
     current_info["provider"] = channel_id
 
     return response
+
+
+filter_passthrough_headers = _filter_passthrough_headers
+
+
+fetch_passthrough_stream = _fetch_passthrough_stream
+
+
+fetch_passthrough_response = _fetch_passthrough_response
+
+
+passthrough_error_wrapper = _passthrough_error_wrapper

@@ -1,4 +1,6 @@
-"""HTTP header 合并工具。"""
+"""HTTP header 合并与客户端 IP 提取。"""
+
+from typing import Any, Optional
 
 
 # 迁移说明：
@@ -14,7 +16,7 @@ def has_header_case_insensitive(headers: dict, key: str) -> bool:
     return any(str(existing_key).lower() == key_lower for existing_key in headers.keys())
 
 
-def _set_header_case_insensitive(headers: dict, key: str, value) -> None:
+def _set_header_case_insensitive(headers: Optional[dict], key: str, value) -> None:
     """大小写无关地写入请求头，避免 Content-Type/content-type 一类重复键。"""
     if not isinstance(headers, dict):
         return
@@ -36,7 +38,7 @@ def _set_header_case_insensitive(headers: dict, key: str, value) -> None:
         headers[target_key] = normalized_value
 
 
-def apply_custom_headers(headers: dict, custom_headers: dict) -> None:
+def apply_custom_headers(headers: dict, custom_headers: Optional[dict]) -> None:
     """将渠道自定义 headers 合并到请求头中。
 
     custom_headers 的值支持两种格式：
@@ -61,3 +63,20 @@ def apply_custom_headers(headers: dict, custom_headers: dict) -> None:
                     break
             continue
         _set_header_case_insensitive(headers, k, v)
+
+
+def extract_client_ip(headers: Any, fallback_host: str | None = None) -> str:
+    """统一从请求头提取真实客户端 IP（CF-Connecting-IP > X-Forwarded-For 最右跳 > X-Real-IP > fallback）。"""
+    if headers is not None:
+        cf_ip = (headers.get("cf-connecting-ip") or "").strip()
+        if cf_ip:
+            return cf_ip
+        forwarded_for = headers.get("x-forwarded-for")
+        if forwarded_for:
+            hops = [part.strip() for part in str(forwarded_for).split(",") if part.strip()]
+            if hops:
+                return hops[-1]
+        real_ip = (headers.get("x-real-ip") or "").strip()
+        if real_ip:
+            return real_ip
+    return fallback_host or "unknown"

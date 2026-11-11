@@ -10,16 +10,17 @@ import os
 import json
 
 from core.env import env_bool
+from core.initialization import ensure_initialized
 from core.json_utils import json_loads
 import uuid
 import asyncio
 import contextvars
 from time import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from pydantic import ValidationError
-from fastapi import Request, BackgroundTasks
+from fastapi import Request, BackgroundTasks, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Send, Scope, Message
@@ -30,7 +31,12 @@ from core.metrics import on_request_start, on_request_end, on_request_model
 from core.stats import enqueue_stats
 from core.utils import truncate_for_logging
 from core.error_response import openai_error_response
-from core.ip_blacklist import ip_blocked_error_response, is_global_ip_blocked, is_key_ip_blocked
+from core.ip_blacklist import (
+    extract_client_ip,
+    ip_blocked_error_response,
+    is_global_ip_blocked,
+    is_key_ip_blocked,
+)
 from core.byok import (
     get_byok_prefixes,
     reset_byok_context,
@@ -85,7 +91,7 @@ async def get_api_key(request: Request) -> Optional[str]:
     return token
 
 
-def should_attempt_unified_request(body: dict) -> bool:
+def should_attempt_unified_request(body: Any) -> bool:
     """
     仅当 body 含统一请求特征字段时才尝试解析 UnifiedRequest。
     避免对渠道管理等非统一 JSON 路由误触发解析。
@@ -166,26 +172,10 @@ class StatsMiddleware:
 
     @staticmethod
     def _get_client_ip(scope: Scope, headers: list) -> str:
-        """
-        获取客户端真实 IP。
-        优先级：X-Forwarded-For > X-Real-IP > scope["client"]
-        """
+        """获取客户端真实 IP（统一委托 core.ip_blacklist.extract_client_ip）。"""
         headers_dict = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in headers}
-
-        # X-Forwarded-For: client, proxy1, proxy2 —— 单层本机反代（Caddy）下取最右侧追加的真实连接 IP，防止客户端伪造头部绕过黑名单与限流
-        # 过滤尾部空项，避免 "1.2.3.4, " 这类头部回退到未校验的 X-Real-IP。
-        forwarded_for = headers_dict.get("x-forwarded-for")
-        if forwarded_for:
-            ips = [ip.strip() for ip in forwarded_for.split(",") if ip.strip()]
-            if ips:
-                return ips[-1]
-
-        real_ip_header = headers_dict.get("x-real-ip")
-        if real_ip_header:
-            return real_ip_header.strip()
-
         client = scope.get("client")
-        return client[0] if client else "unknown"
+        return extract_client_ip(headers_dict, client[0] if client else "unknown")
 
     def _normalize_endpoint(self, method: str, path: str) -> str:
         """归一化端点路径，将带模型名的路径转换为模板格式"""
@@ -204,6 +194,12 @@ class StatsMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            if scope["type"] == "websocket" and scope.get("app") is not None:
+                try:
+                    await ensure_initialized(scope["app"])
+                except HTTPException:
+                    await send({"type": "websocket.close", "code": 1008, "reason": "Instance is not initialized"})
+                    return
             await self.app(scope, receive, send)
             return
 
@@ -225,10 +221,9 @@ class StatsMiddleware:
 
         # 数据库压缩期间挂起请求（不返回错误，等压缩完自动放行）
         try:
-            from main import _db_ready
-            if not _db_ready.is_set():
-                
-                await asyncio.wait_for(_db_ready.wait(), timeout=30)
+            from main import db_ready
+            if not db_ready.is_set():
+                await asyncio.wait_for(db_ready.wait(), timeout=30)
         except (ImportError, asyncio.TimeoutError):
             pass
 
@@ -255,6 +250,13 @@ class StatsMiddleware:
 
         if not app:
             await self.app(scope, receive, send)
+            return
+
+        try:
+            await ensure_initialized(app)
+        except HTTPException as exc:
+            response = openai_error_response(str(exc.detail), exc.status_code)
+            await response(scope, receive, send)
             return
 
         start_time = time()
@@ -332,15 +334,14 @@ class StatsMiddleware:
                 # 修改原因：Key 级启用开关需要在中间件标准鉴权分支同样生效（方言前缀变动时的兜底路径）。
                 # 修改方式：与 core/auth.py 使用同一判定函数；admin JWT 豁免。
                 # 目的：禁用后所有入口一致拒绝。
+                from core.auth import check_key_ancestry_access
                 try:
-                    from core.auth import is_api_key_disabled, _is_admin_jwt_token
-                    if is_api_key_disabled(app, api_index) and not _is_admin_jwt_token(token):
-                        response = openai_error_response("API Key has been disabled", 403)
-                        await response(scope, receive, send)
-                        reset_byok_context(byok_context_tokens)
-                        return
-                except Exception:
-                    pass
+                    check_key_ancestry_access(app, api_index, client_ip)
+                except HTTPException as exc:
+                    response = openai_error_response(exc.detail, exc.status_code)
+                    await response(scope, receive, send)
+                    reset_byok_context(byok_context_tokens)
+                    return
                 if is_key_ip_blocked(app, api_index, client_ip):
                     # 修改原因：标准 /v1 鉴权解析出当前 API Key 后，必须继续检查该 Key 自己的 IP 黑名单。
                     # 修改方式：用 api_index 匹配 app.state.api_key_ip_blacklists 中的预解析规则，命中即返回指定 403。
@@ -446,6 +447,9 @@ class StatsMiddleware:
             "raw_data_expires_at": None,
         }
 
+        if api_index is not None:
+            from core.key_hierarchy import snapshot_key_ancestry
+            snapshot_key_ancestry(request_info_data, config['api_keys'][api_index])
         current_request_info = request_info.set(request_info_data)
         on_request_start()
         response_completed = False
@@ -473,22 +477,14 @@ class StatsMiddleware:
                     if not message.get("more_body", False):
                         break
                 body_bytes = b"".join(body_chunks)
-                # The replay buffer owns the bytes now. Keeping the original chunks
-                # (and the last ASGI message) doubles large bodies for the whole stream.
                 body_chunks.clear()
                 del message
 
                 if body_bytes:
                     try:
-                        # orjson's scratch allocation scales with the input length;
-                        # multi-megabyte inline images can create a very large peak.
-                        # This parse is only for middleware metadata/moderation; the
-                        # downstream app still receives the exact original bytes.
-                        if len(body_bytes) >= 8 * 1024 * 1024:
-                            parsed_body = await asyncio.to_thread(json.loads, body_bytes)
-                        else:
-                            parsed_body = json_loads(body_bytes)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        # 使用 asyncio.to_thread 避免大请求体阻塞事件循环
+                        parsed_body = json_loads(body_bytes)
+                    except json.JSONDecodeError:
                         parsed_body = None
 
             if isinstance(parsed_body, dict):
@@ -502,12 +498,9 @@ class StatsMiddleware:
                 scope["_zoaholic_parsed_json"] = parsed_body
 
             # 获取原始数据保留时间配置（小时），默认为24小时
-            # 不用 safe_get 读取最终数值：它会把显式 0 当作缺省值，导致无法关闭原始日志。
-            raw_data_retention_hours = safe_get(config, "preferences", default={}).get(
-                "log_raw_data_retention_hours", 24
+            raw_data_retention_hours = safe_get(
+                config, "preferences", "log_raw_data_retention_hours", default=24
             )
-            if raw_data_retention_hours is None:
-                raw_data_retention_hours = 24
         
             # 如果配置了保留时间，保存请求头和请求体
             if raw_data_retention_hours > 0:
@@ -521,11 +514,8 @@ class StatsMiddleware:
                 # 保存请求体（使用深度截断，保留结构同时限制大小）
                 # 使用 asyncio.to_thread 避免大请求体阻塞事件循环
                 if body_bytes:
-                    # Reuse parsed containers instead of decoding/parsing the same
-                    # large JSON again just to produce a bounded diagnostic log.
                     current_info["request_body"] = await asyncio.to_thread(
-                        truncate_for_logging,
-                        parsed_body if isinstance(parsed_body, (dict, list)) else body_bytes,
+                        truncate_for_logging, parsed_body if parsed_body is not None else body_bytes
                     )
             
                 # 设置过期时间
@@ -538,9 +528,9 @@ class StatsMiddleware:
                 if method == "POST" and "application/json" in content_type:
                     if not body_sent:
                         body_sent = True
-                        replay_body = body_bytes
-                        body_bytes = b""  # Ownership passes to the downstream receiver.
-                        return {"type": "http.request", "body": replay_body, "more_body": False}
+                        message = {"type": "http.request", "body": body_bytes, "more_body": False}
+                        body_bytes = b""
+                        return message
                     # 等待真正的 disconnect 消息，而不是返回空 body
                     # 这对于 StreamingResponse 的正确迭代很重要
                     return await receive()
@@ -586,12 +576,7 @@ class StatsMiddleware:
 
                         if enable_moderation and moderated_content:
                             background_tasks_for_moderation = BackgroundTasks()
-                            moderation_response = await self._moderate_content(
-                                moderated_content,
-                                api_index,
-                                background_tasks_for_moderation,
-                                Request(scope, receive=receive_wrapper),
-                            )
+                            moderation_response = await self._moderate_content(moderated_content, api_index, background_tasks_for_moderation, app)
                             is_flagged = moderation_response.get("results", [{}])[0].get("flagged", False)
 
                             if is_flagged:
@@ -627,20 +612,16 @@ class StatsMiddleware:
                     if message["type"] == "http.response.body" and not message.get("more_body", False):
                         response_completed = True
 
-                # Validation/moderation is finished. These temporary objects must
-                # not pin another full JSON tree while the downstream SSE is open.
-                # Downstream validation still receives the original, unchanged bytes.
-                parsed_body = None
-                request_model = None
-                moderated_content = None
-
-                # 调用下游应用
+                # Dialect routes take ownership of the parsed object via scope.
+                if is_dialect:
+                    parsed_body = None
                 await self.app(scope, receive_wrapper, send_wrapper)
 
             except ValidationError as e:
                 logger.error(
-                    "Invalid request body, errors: %s",
-                    e.errors(include_input=False),
+                    "Invalid request body: %s, errors: %s",
+                    json.dumps(parsed_body, indent=2, ensure_ascii=False) if parsed_body else "None",
+                    e.errors(),
                 )
                 # 将 validation 错误信息格式化为可读字符串
                 error_details = "; ".join([f"{err['loc'][-1]}: {err['msg']}" for err in e.errors()[:3]])
@@ -664,7 +645,7 @@ class StatsMiddleware:
             reset_byok_context(byok_context_tokens)
 
     async def _moderate_content(
-        self, content: str, api_index: int, background_tasks: BackgroundTasks, http_request: Request
+        self, content: str, api_index: int, background_tasks: BackgroundTasks, app: Any
     ):
         """
         调用 /v1/moderations 路由进行道德审查。
@@ -673,13 +654,7 @@ class StatsMiddleware:
         from routes.moderations import moderations  # 延迟导入避免循环
 
         moderation_request = ModerationRequest(input=content)
-        # 路由首参是当前 HTTP 请求；显式关键字传参，避免审核请求和 key 索引错位。
-        response = await moderations(
-            http_request=http_request,
-            request=moderation_request,
-            background_tasks=background_tasks,
-            api_index=api_index,
-        )
+        response = await moderations(moderation_request, background_tasks, api_index)
 
         # 读取流式响应的内容
         moderation_result = b""

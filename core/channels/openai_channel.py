@@ -313,8 +313,12 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
 
+    if payload.get("stream"):
+        payload["stream_options"] = {**(payload.get("stream_options") or {}), "include_usage": True}
+
     if "api.x.ai" in url:
-        payload.pop("stream_options", None)
+        if not payload.get("stream"):
+            payload.pop("stream_options", None)
         payload.pop("presence_penalty", None)
         payload.pop("frequency_penalty", None)
 

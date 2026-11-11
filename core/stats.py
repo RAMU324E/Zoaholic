@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import json
 from collections import deque
 
 from core.env import env_bool
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 
 from pydantic import BaseModel, field_serializer
-from sqlalchemy import inspect, text, func, select
+from sqlalchemy import inspect, text, func, select, or_
 from sqlalchemy.sql import sqltypes
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +77,15 @@ CHANNEL_STATS_PROVIDER_TIMESTAMP_KEY_SUCCESS_REQUEST_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_channel_stats_provider_timestamp_key_success_request "
     "ON channel_stats(provider, timestamp, provider_api_key, success, request_id)"
 )
+# 修改原因：仪表盘全景统计需要按 timestamp 聚合 token、缓存、耗时、首字与成本，回表读取含大字段的 request_stats 页会增加 I/O。
+# 修改方式：增加覆盖常用指标字段的轻量复合索引。
+# 目的：让仪表盘时序、速度、缓存率与热力图聚合直接走覆盖索引扫描。
+REQUEST_STATS_DASHBOARD_COVER_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_request_stats_dashboard_cover "
+    "ON request_stats(timestamp DESC, success, model, provider, api_key, api_key_name, api_key_group, "
+    "prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens, "
+    "process_time, first_response_time, prompt_price, completion_price)"
+)
 # 修改原因：D1 初始化和 SQLite 启动迁移需要共享同一组性能索引，避免两条数据库路径优化不一致。
 # 修改方式：将 Dashboard、日志列表和渠道分析所需的复合索引集中成不可变元组。
 # 目的：新增实例、旧 SQLite 库重启迁移、D1 初始化都能自动获得相同的查询计划基础。
@@ -83,6 +93,7 @@ STATS_PERFORMANCE_INDEX_SQLS = (
     REQUEST_STATS_TS_PROVIDER_MODEL_INDEX_SQL,
     REQUEST_STATS_MODEL_TIMESTAMP_INDEX_SQL,
     REQUEST_STATS_REQUEST_ID_TOKEN_INDEX_SQL,
+    REQUEST_STATS_DASHBOARD_COVER_INDEX_SQL,
     CHANNEL_STATS_PROVIDER_MODEL_TIMESTAMP_SUCCESS_INDEX_SQL,
     CHANNEL_STATS_PROVIDER_TIMESTAMP_KEY_SUCCESS_REQUEST_INDEX_SQL,
 )
@@ -555,7 +566,30 @@ def get_current_model_prices(app, model_name: str, provider_name: str = None):
         return 0.0, 0.0, 0.0
 
 
-async def compute_total_cost_from_db(filter_api_key: Optional[str] = None, start_dt_obj: Optional[datetime] = None) -> float:
+def key_history_patterns(key_id: str) -> list[str]:
+    """Match one complete element of the compact JSON array, not an ID substring."""
+    encoded = json.dumps(key_id).replace('!', '!!').replace('%', '!%').replace('_', '!_')
+    return ['%' + left + encoded + right + '%' for left in ('[', ',') for right in (',', ']')]
+
+
+def key_history_filter(key_id: str, api_key: str, branch: bool = False):
+    direct = or_(RequestStat.api_key_id == key_id,
+                 RequestStat.api_key_id.is_(None) & (RequestStat.api_key == api_key))
+    return or_(direct, *(RequestStat.key_ancestor_ids.like(pattern, escape='!')
+                        for pattern in key_history_patterns(key_id))) if branch else direct
+
+
+def key_history_sql(key_id: str, api_key: str, branch: bool = False):
+    direct = '(api_key_id = ? OR (api_key_id IS NULL AND api_key = ?))'
+    params = [key_id, api_key]
+    if branch:
+        patterns = key_history_patterns(key_id)
+        return '(' + direct + ' OR ' + ' OR '.join("key_ancestor_ids LIKE ? ESCAPE '!'" for _ in patterns) + ')', params + patterns
+    return direct, params
+
+
+async def compute_total_cost_from_db(filter_api_key: Optional[str] = None, start_dt_obj: Optional[datetime] = None,
+                                     branch_key_id: Optional[str] = None) -> float:
     """
     直接从数据库历史记录累计成本：
     sum((prompt_tokens*prompt_price + completion_tokens*completion_price)/1e6)
@@ -574,7 +608,11 @@ async def compute_total_cost_from_db(filter_api_key: Optional[str] = None, start
             "FROM request_stats WHERE 1=1"
         )
         params: list[Any] = []
-        if filter_api_key:
+        if branch_key_id is not None:
+            clause, key_params = key_history_sql(branch_key_id, filter_api_key, branch=True)
+            sql += ' AND ' + clause
+            params.extend(key_params)
+        elif filter_api_key:
             sql += " AND api_key = ?"
             params.append(filter_api_key)
         if start_dt_obj:
@@ -589,7 +627,9 @@ async def compute_total_cost_from_db(filter_api_key: Optional[str] = None, start
     async with async_session_scope() as session:
         expr = (func.coalesce(RequestStat.prompt_tokens, 0) * func.coalesce(RequestStat.prompt_price, 0.0) + func.coalesce(RequestStat.completion_tokens, 0) * func.coalesce(RequestStat.completion_price, 0.0)) / 1000000.0
         query = select(func.coalesce(func.sum(expr), 0.0))
-        if filter_api_key:
+        if branch_key_id is not None:
+            query = query.where(key_history_filter(branch_key_id, filter_api_key, branch=True))
+        elif filter_api_key:
             query = query.where(RequestStat.api_key == filter_api_key)
         if start_dt_obj:
             query = query.where(RequestStat.timestamp >= start_dt_obj)
@@ -674,13 +714,8 @@ def _unpack_model_prices(price_result) -> tuple[float, float, float]:
 
 
 def _apply_cached_prompt_price(current_info: dict, prompt_price: float, cached_price: float) -> None:
-    """
-    修改原因：数据库没有单独的 cached_price 字段，不能通过表结构保存缓存输入价。
-    修改方式：按 cached_tokens 对 prompt_price 做加权折算，再覆盖 current_info["prompt_price"]。
-    目的：沿用现有成本公式，同时让缓存命中 token 按缓存价格计费。
-    """
-    cached_tokens = current_info.get("cached_tokens", 0) or 0
-    prompt_tokens = current_info.get("prompt_tokens", 0) or 0
+    cached_tokens = current_info.get("cached_tokens") or 0
+    prompt_tokens = current_info.get("prompt_tokens") or 0
     if cached_tokens > 0 and prompt_tokens > 0 and cached_price != prompt_price:
         # clamp: 防止异常情况 cached_tokens > prompt_tokens
         billable_cached = min(cached_tokens, prompt_tokens)
@@ -694,11 +729,12 @@ def enqueue_stats(current_info: dict, app=None, get_model_prices_func=None) -> N
     # 修改原因：请求路径不能再直接等待 SQLite 写入，否则会在 db_semaphore 前堆积协程并阻塞事件循环。
     # 修改方式：同步计算价格后只保存 current_info.copy() 快照，再启动或唤醒唯一的后台 consumer。
     # 目的：让请求结束路径保持轻量，同时防止调用方后续修改 current_info 影响待写入统计。
-    if DISABLE_DATABASE:
-        return
-
+    # 额度结算不依赖数据库；仅在下方入库队列入口检查 DISABLE_DATABASE。
     try:
-        if current_info.get("success") and current_info.get("model"):
+        if current_info.get("_usage_estimated"):
+            # 估算仅保留 Token 统计，不按精确上游用量计费。
+            current_info["prompt_price"] = current_info["completion_price"] = 0.0
+        elif current_info.get("success") and current_info.get("model"):
             if get_model_prices_func:
                 price_result = get_model_prices_func(current_info["model"])
             elif app:
@@ -713,7 +749,16 @@ def enqueue_stats(current_info: dict, app=None, get_model_prices_func=None) -> N
     except Exception:
         pass
 
-    _stats_buffer.append((current_info.copy(), app))
+    # Quota settlement is independent of database availability and write retries.
+    _record_quota_usage_from_info(current_info, app, current_info.get('api_key'))
+    if DISABLE_DATABASE:
+        return
+    queued_info = current_info.copy()
+    if 'key_ancestor_ids' in queued_info:
+        queued_info['key_ancestor_ids'] = json.dumps(queued_info['key_ancestor_ids'], separators=(',', ':'))
+    if 'key_ancestor_keys' in queued_info:
+        queued_info['key_ancestor_keys'] = list(queued_info['key_ancestor_keys'])
+    _stats_buffer.append((queued_info, app))
     _ensure_stats_consumer_started()
     if len(_stats_buffer) >= _STATS_BATCH_SIZE and _stats_flush_event is not None:
         _stats_flush_event.set()
@@ -728,15 +773,15 @@ def _record_quota_usage_from_info(current_info: dict, app, check_key: str) -> No
     if not quota_registry or not check_key:
         return
 
-    tokens_in = current_info.get('prompt_tokens', 0) or 0
-    tokens_out = current_info.get('completion_tokens', 0) or 0
-    total_tokens = current_info.get('total_tokens', 0) or (tokens_in + tokens_out)
+    tokens_in = current_info.get('prompt_tokens') or 0
+    tokens_out = current_info.get('completion_tokens') or 0
+    total_tokens = current_info.get('total_tokens') or (tokens_in + tokens_out)
     cost = (
-        tokens_in * (current_info.get('prompt_price', 0) or 0) +
-        tokens_out * (current_info.get('completion_price', 0) or 0)
+        tokens_in * (current_info.get('prompt_price') or 0) +
+        tokens_out * (current_info.get('completion_price') or 0)
     ) / 1_000_000
-    model = current_info.get('model', 'default') or 'default'
-    client_ip = current_info.get('client_ip', '') or ''
+    model = current_info.get('model') or 'default'
+    client_ip = current_info.get('client_ip') or ''
     if cost > 0 or total_tokens > 0 or tokens_in > 0 or tokens_out > 0:
         quota_registry.record_usage(
             check_key,
@@ -746,6 +791,9 @@ def _record_quota_usage_from_info(current_info: dict, app, check_key: str) -> No
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             client_ip=client_ip,
+            ancestor_keys=current_info.get('key_ancestor_keys'),
+            api_key_id=current_info.get('api_key_id'),
+            ancestor_ids=current_info.get('key_ancestor_ids'),
         )
 
 
@@ -846,11 +894,7 @@ async def _batch_write_stats(batch: list) -> None:
                         await d1_client.execute(sql, params)
 
                 for current_info, app in batch:
-                    check_key = current_info.get("api_key")
-                    if app and check_key and hasattr(app.state, 'paid_api_keys_states'):
-                        if check_key in app.state.paid_api_keys_states and current_info.get("total_tokens", 0) > 0:
-                            await update_paid_api_keys_states(app, check_key)
-                    _record_quota_usage_from_info(current_info, app, check_key)
+                    await _update_paid_chain_states(current_info, app)
                 return
 
             async with db_semaphore:
@@ -871,11 +915,7 @@ async def _batch_write_stats(batch: list) -> None:
                             session.add(new_request_stat)
 
             for current_info, app in batch:
-                check_key = current_info.get("api_key")
-                if app and check_key and hasattr(app.state, 'paid_api_keys_states'):
-                    if check_key in app.state.paid_api_keys_states and current_info.get("total_tokens", 0) > 0:
-                        await update_paid_api_keys_states(app, check_key)
-                _record_quota_usage_from_info(current_info, app, check_key)
+                await _update_paid_chain_states(current_info, app)
             return
 
         except Exception as e:
@@ -903,12 +943,12 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
         app: FastAPI 应用实例（用于获取模型价格）
         get_model_prices_func: 获取模型价格的函数，签名为 (model_name) -> (prompt_price, completion_price[, cached_price])
     """
-    if DISABLE_DATABASE:
-        return
-
     # 在成功请求时，快照当前价格，写入数据库
     try:
-        if current_info.get("success") and current_info.get("model"):
+        if current_info.get("_usage_estimated"):
+            # 估算仅保留 Token 统计，不按精确上游用量计费。
+            current_info["prompt_price"] = current_info["completion_price"] = 0.0
+        elif current_info.get("success") and current_info.get("model"):
             if get_model_prices_func:
                 price_result = get_model_prices_func(current_info["model"])
             elif app:
@@ -923,6 +963,14 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
     except Exception:
         pass
 
+    # Keep the legacy awaitable entry point aligned with enqueue_stats.
+    _record_quota_usage_from_info(current_info, app, current_info.get('api_key'))
+    if DISABLE_DATABASE:
+        return
+    db_info = current_info.copy()
+    if 'key_ancestor_ids' in db_info:
+        db_info['key_ancestor_ids'] = json.dumps(db_info['key_ancestor_ids'], separators=(',', ':'))
+
     # 使用重试机制写入数据库
     for attempt in range(SQLITE_MAX_RETRIES):
         try:
@@ -932,7 +980,7 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
                     return
                 async with db_semaphore:
                     columns = [column.key for column in RequestStat.__table__.columns]
-                    filtered_info = {k: v for k, v in current_info.items() if k in columns}
+                    filtered_info = {k: v for k, v in db_info.items() if k in columns}
                     for key, value in list(filtered_info.items()):
                         if isinstance(value, str):
                             filtered_info[key] = value.replace('\x00', '')
@@ -950,11 +998,7 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
                     params = [filtered_info[k] for k in insert_cols]
                     await d1_client.execute(sql, params)
 
-                check_key = current_info.get("api_key")
-                if app and check_key and hasattr(app.state, 'paid_api_keys_states'):
-                    if check_key in app.state.paid_api_keys_states and current_info.get("total_tokens", 0) > 0:
-                        await update_paid_api_keys_states(app, check_key)
-                _record_quota_usage_from_info(current_info, app, check_key)
+                await _update_paid_chain_states(current_info, app)
                 return
 
             # 等待获取数据库访问权限
@@ -962,7 +1006,7 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
                 async with async_session_scope() as session:
                     async with session.begin():
                         columns = [column.key for column in RequestStat.__table__.columns]
-                        filtered_info = {k: v for k, v in current_info.items() if k in columns}
+                        filtered_info = {k: v for k, v in db_info.items() if k in columns}
 
                         # 清洗字符串中的 NUL 字符，防止 PostgreSQL 报错
                         for key, value in filtered_info.items():
@@ -973,12 +1017,7 @@ async def update_stats(current_info: dict, app=None, get_model_prices_func=None)
                         session.add(new_request_stat)
                         await session.commit()
 
-            # 检查付费 API 密钥状态更新
-            check_key = current_info.get("api_key")
-            if app and check_key and hasattr(app.state, 'paid_api_keys_states'):
-                if check_key in app.state.paid_api_keys_states and current_info.get("total_tokens", 0) > 0:
-                    await update_paid_api_keys_states(app, check_key)
-            _record_quota_usage_from_info(current_info, app, check_key)
+            await _update_paid_chain_states(current_info, app)
             return  # 成功后直接返回
 
         except Exception as e:
@@ -1250,6 +1289,23 @@ async def get_usage_data(filter_api_key: Optional[str] = None, filter_model: Opt
 
 # ============== 付费 API 密钥状态 ==============
 
+async def _update_paid_chain_states(current_info, app):
+    if not app or not current_info.get('total_tokens', 0):
+        return
+    states = getattr(app.state, 'paid_api_keys_states', {})
+    if current_info.get('api_key_id') is not None:
+        ancestor_ids = current_info.get('key_ancestor_ids') or []
+        if isinstance(ancestor_ids, str):
+            ancestor_ids = json.loads(ancestor_ids)
+        ids = {current_info['api_key_id'], *ancestor_ids}
+        keys = [key['api'] for key in app.state.config.get('api_keys', []) if key.get('id') in ids]
+    else:
+        keys = [current_info.get('api_key'), *(current_info.get('key_ancestor_keys') or [])]
+    for key in dict.fromkeys(keys):
+        if key in states:
+            await update_paid_api_keys_states(app, key)
+
+
 async def update_paid_api_keys_states(app, paid_key: str):
     """
     更新付费API密钥的状态
@@ -1272,7 +1328,10 @@ async def update_paid_api_keys_states(app, paid_key: str):
         # 仍返回聚合的 token 统计，供前端展示
         all_tokens_info = await get_usage_data(filter_api_key=paid_key, start_dt_obj=created_at)
         # 关键修改：总消耗改为从历史数据逐条累计当时价格
-        total_cost = await compute_total_cost_from_db(filter_api_key=paid_key, start_dt_obj=created_at)
+        total_cost = await compute_total_cost_from_db(
+            filter_api_key=paid_key, start_dt_obj=created_at,
+            branch_key_id=app.state.config['api_keys'][check_index].get('id'),
+        )
 
         app.state.paid_api_keys_states[paid_key] = {
             "credits": credits,

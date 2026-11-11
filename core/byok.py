@@ -45,7 +45,7 @@ def build_byok_prefixes(api_keys_config: list) -> list:
 
 
 def resolve_byok_token(
-    token: str,
+    token: Optional[str],
     byok_prefixes: list,
 ) -> Optional[Tuple[int, str, str]]:
     """尝试将 token 匹配到 BYOK 前缀。
@@ -91,7 +91,7 @@ def is_byok_api_key(api_keys_config: list, api_index: int) -> bool:
 def get_byok_prefixes(app: Any) -> list:
     """安全读取 app.state.byok_prefixes，缺失时返回空列表。"""
     try:
-        return getattr(app.state, "byok_prefixes", []) or []
+        return getattr(app.state, "byok_prefixes", None) or []
     except Exception:
         return []
 
@@ -184,7 +184,7 @@ def update_request_info_auth(
         info = request_info.get()
         if not info:
             return
-        config = getattr(app.state, "config", {}) or {}
+        config = getattr(app.state, "config", None) or {}
         info["api_key"] = token_for_stats
         info["api_key_name"] = safe_get(config, "api_keys", api_index, "name", default=None)
         info["api_key_group"] = safe_get(config, "api_keys", api_index, "group", default=None)

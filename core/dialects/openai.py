@@ -105,7 +105,7 @@ async def render_openai_response(
     return canonical_response
 
 
-async def render_openai_stream(canonical_sse_chunk: str) -> str:
+async def render_openai_stream(canonical_sse_chunk: Any) -> Any:
     """Canonical SSE -> OpenAI SSE
 
     大多数 chunk 直接透传；usage chunk 需要补齐 prompt_tokens_details，避免经过流式方言层时缓存字段丢失。

@@ -78,7 +78,7 @@ TOOL_SUFFIXES = {
 # ============================================================
 
 
-def parse_oai_suffixes(model: str) -> Tuple[str, Optional[str], Set[str]]:
+def parse_oai_suffixes(model: Optional[str]) -> Tuple[Optional[str], Optional[str], Set[str]]:
     """
     解析模型名中的所有 OAI 后缀（从右到左）。
 

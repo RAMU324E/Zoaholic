@@ -17,7 +17,7 @@ from uuid import uuid4
 import httpx
 
 from core.channels.gemini_channel import (
-    _is_image_model,
+    is_image_model,
     fetch_gemini_response,
     fetch_gemini_response_stream,
     get_gemini_payload,
@@ -584,10 +584,10 @@ class AntigravityProvider(OAuthProvider):
         # 修改方式：复制原凭据后只覆盖 access_token、可选 refresh_token、token_type、expires_at、email、project_id 和 credits raw。
         # 目的：保证刷新不会破坏账号身份、项目标识和后续 refresh 所需凭据。
         updated = dict(original or {})
-        access_token = token_response.get("access_token") or updated.get("access_token")
-        if not access_token:
+        if "access_token" in token_response and token_response["access_token"]:
+            updated["access_token"] = token_response["access_token"]
+        elif not updated.get("access_token"):
             raise ValueError("Token response missing access_token")
-        updated["access_token"] = access_token
 
         if token_response.get("refresh_token"):
             updated["refresh_token"] = token_response["refresh_token"]
@@ -1018,10 +1018,7 @@ def _normalize_tools(tools: Any) -> Any:
 
 def _normalize_antigravity_request_payload(payload: dict) -> dict:
     """把 Gemini payload 调整为 Antigravity request 子对象。"""
-    # 修改原因：普通 Gemini adapter 会混入 URL 模型、snake_case tool_config 等字段，Antigravity 外层已单独携带 model。
-    # 修改方式：深拷贝后移除 model，并把 system/toolConfig 等关键字段规范为 camelCase。
-    # 目的：让请求体与 CPA 的 geminiToAntigravity 结构保持一致。
-    request_payload = copy.deepcopy(payload) if isinstance(payload, dict) else {}
+    request_payload = copy.deepcopy(payload)
     request_payload.pop("model", None)
 
     if "system_instruction" in request_payload and "systemInstruction" not in request_payload:
@@ -1144,7 +1141,7 @@ def _sanitize_reasoning_model_payload(request_payload: dict, model: str, thinkin
 def _build_antigravity_payload(gemini_payload: dict, original_model: str, provider: dict | None, request: Any) -> dict:
     """把 Gemini payload 包成 Antigravity v1internal payload。"""
     upstream_model, thinking_level = _rewrite_thinking_suffix(original_model)
-    is_image = _is_image_model(original_model)
+    is_image = is_image_model(original_model)
     request_payload = _normalize_antigravity_request_payload(gemini_payload)
     request_payload["sessionId"] = _build_session_id(_first_user_message_text(request))
     _apply_claude_validated_tool_config(request_payload, upstream_model)
@@ -1176,7 +1173,7 @@ async def get_antigravity_payload(request, engine, provider, api_key=None):
     _, _gemini_headers, gemini_payload = await get_gemini_payload(request, "gemini", gemini_provider, api_key)
 
     original_model = _resolve_original_model(request, provider_copy)
-    action = STREAM_ACTION if getattr(request, "stream", False) else GENERATE_ACTION
+    action = STREAM_ACTION if request.stream else GENERATE_ACTION
     version = await get_antigravity_version()
     url = _build_antigravity_url(provider_copy, action)
     headers = _build_generation_headers(api_key, version)
@@ -1186,22 +1183,16 @@ async def get_antigravity_payload(request, engine, provider, api_key=None):
 
 async def get_antigravity_passthrough_meta(request, engine, provider, api_key=None):
     """透传模式下只构建 Antigravity URL 和白名单请求头。"""
-    # 修改原因：Gemini 方言透传时 payload 已经是入口原生 Gemini body，不能再运行 OpenAI 到 Gemini 转换。
-    # 修改方式：这里只返回 Antigravity v1internal URL 和认证头，实际包裹交给 passthrough_payload_adapter。
-    # 目的：让透传路径也能使用同一套 Antigravity OAuth 和请求伪装。
     provider_copy = dict(provider or {})
-    action = STREAM_ACTION if getattr(request, "stream", False) else GENERATE_ACTION
+    action = STREAM_ACTION if request.stream else GENERATE_ACTION
     version = await get_antigravity_version()
     return _build_antigravity_url(provider_copy, action), _build_generation_headers(api_key, version), {}
 
 
 async def patch_antigravity_passthrough_payload(payload: dict, modifications: dict, request, engine: str, provider: dict, api_key=None) -> dict:
     """把 Gemini 原生透传 payload 包成 Antigravity payload。"""
-    # 修改原因：透传入口保留普通 Gemini body，而 Cloud Code API 仍要求 Antigravity 外层字段。
-    # 修改方式：按模型映射、project 和 sessionId 调用同一个 _build_antigravity_payload。
-    # 目的：保持普通请求与透传请求的上游协议一致。
     original_model = _resolve_original_model(request, provider)
-    return _build_antigravity_payload(payload if isinstance(payload, dict) else {}, original_model, provider, request)
+    return _build_antigravity_payload(payload, original_model, provider, request)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1343,11 +1334,10 @@ class _AntigravityResponseUnwrapClient:
             "status_code": response.status_code,
             "headers": response.headers,
             "content": content,
-            "extensions": getattr(response, "extensions", None) or {},
+            "extensions": response.extensions or {},
         }
-        request = getattr(response, "request", None)
-        if request is not None:
-            response_kwargs["request"] = request
+        if response._request is not None:
+            response_kwargs["request"] = response.request
         return httpx.Response(**response_kwargs)
 
     def stream(self, *args, **kwargs):
@@ -1398,9 +1388,9 @@ async def fetch_antigravity_passthrough_stream(client, url, headers, payload, mo
     # 修改原因：Gemini 方言透传会绕过普通响应 adapter，导致共享 client 的默认头和 Antigravity response 外壳泄露给客户端。
     # 修改方式：发送前使用 _AntigravityHTTP11Client 清理请求头，成功响应逐行去掉 response 外壳并补成标准 SSE data 行。
     # 目的：让 Gemini 原生客户端在透传模式下也看到普通 Gemini streamGenerateContent 形态，而不是 Cloud Code 外壳。
-    from core.response import _log_upstream_request, check_response
+    from core.response import log_upstream_request, check_response
 
-    _log_upstream_request(url, payload)
+    log_upstream_request(url, payload)
     wrapped_client = _AntigravityHTTP11Client(client)
     stream_timeout = httpx.Timeout(
         connect=15.0,
@@ -1427,9 +1417,9 @@ async def fetch_antigravity_passthrough_response(client, url, headers, payload, 
     # 修改原因：非流式透传默认会把 {response:{...}, traceId:"..."} 原样返回，Gemini 方言客户端无法按 candidates 顶层解析。
     # 修改方式：使用同一套 HTTP/1.1/header 清理 wrapper 发送请求，成功响应只解包 response 字段，非 2xx 保持 check_response 原始错误处理。
     # 目的：让透传非流式输出恢复为普通 Gemini generateContent JSON，同时不改变上游错误体的可观测性。
-    from core.response import _log_upstream_request, check_response
+    from core.response import log_upstream_request, check_response
 
-    _log_upstream_request(url, payload)
+    log_upstream_request(url, payload)
     wrapped_client = _AntigravityHTTP11Client(client)
     request_timeout = httpx.Timeout(
         connect=15.0,

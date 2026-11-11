@@ -30,11 +30,11 @@ def _append_authorized_virtual_models(all_models, unique_models, config, api_ind
     # 修改原因：虚拟模型名需要出现在 /v1/models 中，但只能展示当前 API Key 有权限访问的条目。
     # 修改方式：读取 preferences.virtual_models，保留 enabled 不为 false 且被 model 数组或 all 授权的虚拟名。
     # 目的：让客户端可以发现可用虚拟模型，同时不引入新的授权机制。
-    virtual_models = safe_get(config, 'preferences', 'virtual_models', default={}) or {}
+    virtual_models = safe_get(config, 'preferences', 'virtual_models', default=None) or {}
     if not isinstance(virtual_models, dict):
         return
 
-    model_rules = safe_get(config, 'api_keys', api_index, 'model', default=[]) or []
+    model_rules = safe_get(config, 'api_keys', api_index, 'model', default=None) or []
     normalized_rules = []
     for rule in model_rules:
         if isinstance(rule, dict) and rule:
@@ -45,12 +45,12 @@ def _append_authorized_virtual_models(all_models, unique_models, config, api_ind
     allow_all = "all" in normalized_rules
     allowed_names = set(normalized_rules)
 
-    # Admin keys can reach every enabled provider; ordinary keys retain group isolation.
-    admin_access = is_admin_api_key(config, api_index)
+    # 当前 API Key 允许的分组
+    admin_access = is_admin_api_key(config, api_index) and not config['api_keys'][api_index].get('parent_id')
     api_key_groups = safe_get(config, 'api_keys', api_index, 'groups', default=['default'])
     if isinstance(api_key_groups, str):
         api_key_groups = [api_key_groups]
-    if not isinstance(api_key_groups, list) or not api_key_groups:
+    if not isinstance(api_key_groups, list):
         api_key_groups = ['default']
     allowed_groups = set(api_key_groups)
 
@@ -140,16 +140,16 @@ def _split_scoped_model_rule(model_rule, config, api_list):
     return provider_name, model_name
 
 
-def post_all_models(api_index, config, api_list, models_list):
+def _post_models_for_key(api_index, config, api_list, models_list):
     all_models = []
     unique_models = set()
 
-    # Admin keys list every enabled provider; ordinary keys are restricted by groups.
-    admin_access = is_admin_api_key(config, api_index)
+    # 允许分组集合：仅返回与当前 API Key 分组有交集的渠道模型
+    admin_access = is_admin_api_key(config, api_index) and not config['api_keys'][api_index].get('parent_id')
     api_key_groups = safe_get(config, 'api_keys', api_index, 'groups', default=['default'])
     if isinstance(api_key_groups, str):
         api_key_groups = [api_key_groups]
-    if not isinstance(api_key_groups, list) or not api_key_groups:
+    if not isinstance(api_key_groups, list):
         api_key_groups = ['default']
     allowed_groups = set(api_key_groups)
     
@@ -338,6 +338,21 @@ def post_all_models(api_index, config, api_list, models_list):
     # 按模型 ID 进行 Unicode 排序
     all_models.sort(key=lambda x: x["id"])
     return all_models
+
+
+def post_all_models(api_index, config, api_list, models_list):
+    """Intersect catalog permissions, keeping the actual caller as list owner."""
+    from core.key_hierarchy import key_chain
+    key = config['api_keys'][api_index]
+    models = _post_models_for_key(api_index, config, api_list, models_list)
+    if not key.get('parent_id'):
+        return models
+    indices = {item['api']: index for index, item in enumerate(config['api_keys'])}
+    for ancestor in key_chain(config, key['api'])[1:]:
+        allowed = {item['id'] for item in _post_models_for_key(
+            indices[ancestor['api']], config, api_list, models_list)}
+        models = [item for item in models if item['id'] in allowed]
+    return models
 
 
 def get_all_models(config, allowed_groups=None):

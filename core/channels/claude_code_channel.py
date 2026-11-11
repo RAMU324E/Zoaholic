@@ -602,9 +602,9 @@ class ClaudeCodeProvider(OAuthProvider):
                 async with httpx.AsyncClient(timeout=30) as client:
                     response = await client.post(token_url, json=data, headers=headers)
                 if response.status_code >= 400:
-                    message = getattr(response, "text", "")
+                    message = response.text
                     if refresh_token and response.status_code == 429:
-                        retry_after = _parse_retry_after(getattr(response, "headers", None))
+                        retry_after = _parse_retry_after(response.headers)
                         _claude_refresh_blocked_until[refresh_token] = time.time() + retry_after
                         raise _RefreshHTTPError(response.status_code, message, retryable=False)
                     if refresh_token:
@@ -1324,9 +1324,9 @@ async def _passthrough_sanitize(payload, modifications, request, engine, provide
 
 async def _passthrough_stream_with_reverse_map(client, url, headers, payload, model, timeout):
     """透传流式响应：对每个 chunk 执行反向工具名映射。"""
-    from core.passthrough import _fetch_passthrough_stream
+    from core.passthrough import fetch_passthrough_stream
     try:
-        async for chunk in _fetch_passthrough_stream(client, url, headers, payload, timeout):
+        async for chunk in fetch_passthrough_stream(client, url, headers, payload, timeout):
             if isinstance(chunk, str):
                 yield _reverse_map_chunk(chunk)
             else:
@@ -1337,9 +1337,9 @@ async def _passthrough_stream_with_reverse_map(client, url, headers, payload, mo
 
 async def _passthrough_response_with_reverse_map(client, url, headers, payload, model, timeout):
     """透传非流式响应：对每个 chunk 执行反向工具名映射。"""
-    from core.passthrough import _fetch_passthrough_response
+    from core.passthrough import fetch_passthrough_response
     try:
-        async for chunk in _fetch_passthrough_response(client, url, headers, payload, timeout):
+        async for chunk in fetch_passthrough_response(client, url, headers, payload, timeout):
             if isinstance(chunk, str):
                 yield _reverse_map_chunk(chunk)
             else:

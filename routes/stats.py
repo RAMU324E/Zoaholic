@@ -13,7 +13,7 @@ from pydantic import BaseModel, field_serializer, Field
 from sqlalchemy import select, case, func, desc, update, delete, or_
 
 from db import RequestStat, ChannelStat, async_session_scope, DISABLE_DATABASE, DB_TYPE
-from core.stats import get_usage_data, compute_total_cost_from_db
+from core.stats import get_usage_data, compute_total_cost_from_db, key_history_filter, key_history_sql
 from utils import safe_get, query_channel_key_stats
 from routes.deps import rate_limit_dependency, verify_api_key, verify_admin_api_key, get_app
 from core.auth import _extract_token, _is_admin_jwt_token
@@ -537,22 +537,16 @@ def _build_key_analytics_time_range(
 
 
 def _safe_int(value: Any) -> int:
-    """把数据库聚合值安全转成 int。
-
-    修改原因：SQLite、D1 和不同驱动可能把 COUNT/SUM 返回为 int、float、Decimal 或字符串。
-    修改方式：统一空值归零，再尝试 int(float(value))。
-    目的：让接口返回类型稳定，不受数据库驱动影响。
-    """
-
-    if value is None:
+    """把数据库聚合值安全转成 int（使用 Decimal 避免 float 精度损失）。"""
+    if value is None or isinstance(value, bool):
         return 0
+    if isinstance(value, int):
+        return value
     try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return 0
+        from decimal import Decimal
+        return int(Decimal(str(value)))
+    except Exception:
+        return 0
 
 
 def _safe_float(value: Any) -> float:
@@ -594,7 +588,7 @@ def _key_analytics_prefix(api_key: str) -> str:
     if not text:
         return ""
     if len(text) <= 8:
-        return f"{text}***"
+        return "***"
     return f"{text[:8]}***"
 
 
@@ -1249,7 +1243,7 @@ async def get_key_analytics_ip_detail(
         key=lambda value: _stringify_datetime(value) or "",
         default=None,
     )
-    request_app = getattr(request, "app", None)
+    request_app = request.scope.get("app") if request is not None else None
     quota_registry = getattr(request_app.state, "quota_registry", None) if request_app is not None else None
     quota_rules = quota_registry.get_ip_quota_breakdown(matched_api_key, ip) if quota_registry else []
 
@@ -1526,6 +1520,8 @@ async def get_usage_analysis(
     hours: Optional[int] = Query(default=24, ge=1, le=8760, description="Lookback hours (used when start/end not provided)"),
     provider: Optional[str] = Query(default=None, description="Provider filter, comma-separated for multiple"),
     model: Optional[str] = Query(default=None, description="Model filter, comma-separated for multiple"),
+    api_key_id: Optional[str] = None,
+    key_scope: Literal['direct', 'branch'] = 'direct',
 ):
     """
     按渠道和模型分组的用量分析，返回请求次数、Token 消耗量、历史记录费用及当前报价估算费用。
@@ -1539,6 +1535,13 @@ async def get_usage_analysis(
 
     provider_list = [p.strip() for p in provider.split(',') if p.strip()] if provider else []
     model_list = [m.strip() for m in model.split(',') if m.strip()] if model else []
+    legacy_api_key = None
+    if api_key_id is not None:
+        selected_key = next((key for key in request.app.state.config.get('api_keys', [])
+                             if key.get('id') == api_key_id), None)
+        if selected_key is None:
+            raise HTTPException(status_code=404, detail='API Key not found')
+        legacy_api_key = selected_key['api']
 
     if start_datetime or end_datetime:
         try:
@@ -1571,6 +1574,10 @@ async def get_usage_analysis(
             "FROM request_stats WHERE 1=1"
         )
         params: list = []
+        if api_key_id is not None:
+            key_sql, key_params = key_history_sql(api_key_id, legacy_api_key, branch=key_scope == 'branch')
+            sql += ' AND ' + key_sql
+            params.extend(key_params)
         if start_dt:
             sql += " AND timestamp >= ?"
             params.append(start_dt)
@@ -1621,6 +1628,8 @@ async def get_usage_analysis(
                 func.coalesce(func.sum(RequestStat.total_tokens), 0).label('total_tokens'),
                 func.coalesce(func.sum(_key_analytics_sa_cost_expr()), 0.0).label('recorded_cost'),
             )
+            if api_key_id is not None:
+                query = query.where(key_history_filter(api_key_id, legacy_api_key, branch=key_scope == 'branch'))
             if start_dt:
                 query = query.where(RequestStat.timestamp >= start_dt)
             if end_dt:
@@ -1679,6 +1688,8 @@ async def get_usage_analysis(
         "end_datetime": end_detail,
         "provider_filter": provider or "all",
         "model_filter": model or "all",
+        "api_key_id": api_key_id,
+        "key_scope": key_scope,
     })
 
 
@@ -1794,7 +1805,7 @@ async def get_model_trend(
         if h not in tokens_chart_dict:
             tokens_chart_dict[h] = {"hour": h}
         chart_dict[h][m] = item['count']
-        tokens_chart_dict[h][m] = item.get('tokens', 0) or 0
+        tokens_chart_dict[h][m] = item.get('tokens') or 0
 
     chart_data = sorted(chart_dict.values(), key=lambda x: x['hour'])
     tokens_chart_data = sorted(tokens_chart_dict.values(), key=lambda x: x['hour'])
@@ -1805,9 +1816,9 @@ async def get_model_trend(
         h = item['hour']
         if h not in token_breakdown:
             token_breakdown[h] = {"hour": h, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
-        token_breakdown[h]["prompt_tokens"] += item.get("prompt_tokens", 0) or 0
-        token_breakdown[h]["completion_tokens"] += item.get("completion_tokens", 0) or 0
-        token_breakdown[h]["cached_tokens"] += item.get("cached_tokens", 0) or 0
+        token_breakdown[h]["prompt_tokens"] += item.get("prompt_tokens") or 0
+        token_breakdown[h]["completion_tokens"] += item.get("completion_tokens") or 0
+        token_breakdown[h]["cached_tokens"] += item.get("cached_tokens") or 0
     token_breakdown_data = sorted(token_breakdown.values(), key=lambda x: x['hour'])
 
     return JSONResponse(content={
@@ -2040,7 +2051,7 @@ async def api_keys_states(token: str = Depends(verify_admin_api_key)):
                 quota_states[api] = quota_registry.get_key_status(api)
 
     response = ApiKeysStatesResponse(api_keys_states=states_dict)
-    resp_dict = response.model_dump() if hasattr(response, 'model_dump') else response.dict()
+    resp_dict = response.model_dump()
     resp_dict['quota_states'] = quota_states
     return resp_dict
 
@@ -2089,59 +2100,30 @@ async def add_credits_to_api_key(
     """
     为指定的 API key 添加额度
     """
-    from core.log_config import logger
-    from utils import update_config, save_config_to_db, save_api_yaml
-    from core.env import env_bool
-    import os
-    
+    from copy import deepcopy
+    from core.key_hierarchy import raw_key_config
+    from core.stats import update_paid_api_keys_states
+    from routes.admin import persist_config
+
     app = get_app()
-    
     if paid_key not in app.state.paid_api_keys_states:
-        raise HTTPException(
-            status_code=404,
-            detail=f"API key '{paid_key}' not found in paid API keys states."
-        )
-
-    app.state.paid_api_keys_states[paid_key]["credits"] += float(amount)
-
-    # 持久化：同步回写 app.state.config 中的 credits
-    try:
-        api_list = getattr(app.state, 'api_list', []) or []
-        if paid_key in api_list:
-            key_index = api_list.index(paid_key)
-            api_keys = app.state.config.get('api_keys', [])
-            if key_index < len(api_keys) and isinstance(api_keys[key_index], dict):
-                if 'preferences' not in api_keys[key_index]:
-                    api_keys[key_index]['preferences'] = {}
-                api_keys[key_index]['preferences']['credits'] = app.state.paid_api_keys_states[paid_key]["credits"]
-                # 首次设置 credits 时自动写入计费起始时间
-                if not api_keys[key_index]['preferences'].get('created_at'):
-                    from datetime import datetime, timezone
-                    api_keys[key_index]['preferences']['created_at'] = datetime.now(timezone.utc)
-
-                config_storage = (os.getenv("CONFIG_STORAGE") or "file").strip().lower()
-                if config_storage in ("file", "auto") or env_bool("SYNC_CONFIG_TO_FILE", False):
-                    save_api_yaml(app.state.config)
-                if config_storage in ("auto", "db"):
-                    await save_config_to_db(app.state.config)
-    except Exception as e:
-        logger.warning(f"Failed to persist credits change: {e}")
-
-    current_credits = app.state.paid_api_keys_states[paid_key]["credits"]
-    total_cost = app.state.paid_api_keys_states[paid_key]["total_cost"]
-    app.state.paid_api_keys_states[paid_key]["enabled"] = current_credits >= total_cost
-
-    logger.info(
-        f"Credits for API key '{paid_key}' updated. "
-        f"Amount added: {amount}, New credits: {current_credits}, "
-        f"Enabled: {app.state.paid_api_keys_states[paid_key]['enabled']}"
-    )
-
+        raise HTTPException(status_code=404, detail="API key not found in paid API keys states")
+    key_index = app.state.api_list.index(paid_key)
+    candidate = deepcopy(app.state.config)
+    raw = raw_key_config(candidate['api_keys'][key_index])
+    prefs = raw.setdefault('preferences', {})
+    prefs['credits'] = app.state.paid_api_keys_states[paid_key]['credits'] + float(amount)
+    if not prefs.get('created_at'):
+        prefs['created_at'] = app.state.paid_api_keys_states[paid_key].get('created_at') or datetime.now(timezone.utc)
+    candidate['api_keys'][key_index] = raw
+    await persist_config(app, sections_to_verify=['api_keys'], candidate_config=candidate)
+    await update_paid_api_keys_states(app, paid_key)
+    state = app.state.paid_api_keys_states[paid_key]
     return JSONResponse(content={
-        "message": f"Successfully added {amount} credits to API key '{paid_key}'.",
-        "paid_key": paid_key,
-        "new_credits": current_credits,
-        "enabled": app.state.paid_api_keys_states[paid_key]["enabled"]
+        'message': 'Credits updated',
+        'paid_key': paid_key,
+        'new_credits': state['credits'],
+        'enabled': state['enabled'],
     })
 
 
@@ -2754,3 +2736,1275 @@ async def resolve_prices(request: Request, token: str = Depends(verify_admin_api
         prices[model_name] = {"prompt": prompt_price, "completion": completion_price}
     
     return JSONResponse(content={"prices": prices})
+
+
+
+
+@router.get("/v1/stats/dashboard_overview", dependencies=[Depends(rate_limit_dependency)])
+async def get_dashboard_overview(
+    request: Request,
+    token: str = Depends(verify_admin_api_key),
+    range_key: str = Query(default="24h", description="Time range key: 1h | 6h | 24h | today | 3d | week | month | 30d | all"),
+    start_datetime: Optional[str] = Query(default=None, description="Optional custom start ISO datetime"),
+    end_datetime: Optional[str] = Query(default=None, description="Optional custom end ISO datetime"),
+    model: Optional[str] = Query(default=None, description="Optional comma-separated model filter"),
+    provider: Optional[str] = Query(default=None, description="Optional comma-separated provider filter"),
+    key_hash: Optional[str] = Query(default=None, description="Optional comma-separated key_hash filter"),
+    tz_offset_minutes: int = Query(default=-480, ge=-840, le=840, description="Browser timezoneOffset in minutes (e.g. -480 for UTC+8)"),
+    recent_limit: int = Query(default=60, ge=10, le=200),
+):
+    """仪表盘全景统计端点：支持全局模型/渠道/Key/自定义时间过滤，单次请求返回全套遥测卡片、多模式时序、分模型/分Key趋势、最近请求、热力图与交叉明细。"""
+    if DISABLE_DATABASE:
+        return JSONResponse(content={"empty": True})
+
+    app = request.app
+    now_utc = datetime.now(timezone.utc)
+    local_offset = timedelta(minutes=-tz_offset_minutes)
+    local_tz = timezone(local_offset)
+    now_local = now_utc.astimezone(local_tz)
+
+    filter_models = {m.strip() for m in (model or "").split(",") if m.strip()}
+    filter_providers_raw = {p.strip() for p in (provider or "").split(",") if p.strip()}
+    filter_key_hashes = {k.strip().lower() for k in (key_hash or "").split(",") if k.strip()}
+
+    # 从当前运行配置提取 API Key 名称、分组及母子 Key 关系（仅用于在后端补全展示标签，绝不向前端暴露原始密钥）
+    cfg = app.state.config if (app is not None and hasattr(app.state, "config") and isinstance(app.state.config, dict)) else {}
+    cfg_keys_list = cfg.get("api_keys") if isinstance(cfg.get("api_keys"), list) else []
+    cfg_by_id: dict[str, dict[str, Any]] = {}
+    for item in cfg_keys_list:
+        if isinstance(item, dict) and item.get("id"):
+            cfg_by_id[str(item["id"])] = item
+
+    cfg_key_meta: dict[str, dict[str, Optional[str]]] = {}
+    for item in cfg_keys_list:
+        if not isinstance(item, dict):
+            continue
+        raw_api = str(item.get("api") or "").strip()
+        if not raw_api:
+            continue
+        prefs = item.get("preferences") if isinstance(item.get("preferences"), dict) else {}
+        k_name = item.get("name") or prefs.get("name") or None
+        k_group = item.get("group") or prefs.get("group") or None
+        parent_name: Optional[str] = None
+        parent_id = item.get("parent_id")
+        if parent_id and str(parent_id) in cfg_by_id:
+            p_item = cfg_by_id[str(parent_id)]
+            p_prefs = p_item.get("preferences") if isinstance(p_item.get("preferences"), dict) else {}
+            parent_name = p_item.get("name") or p_prefs.get("name") or _key_analytics_prefix(str(p_item.get("api") or ""))
+        cfg_key_meta[raw_api] = {
+            "name": str(k_name) if k_name else None,
+            "group": str(k_group) if k_group else None,
+            "parent_name": str(parent_name) if parent_name else None,
+        }
+
+    key_identity_memo: dict[str, dict[str, Any]] = {}
+
+    def _resolve_key_identity(raw_key_val: Any, db_name: Any = None, db_group: Any = None) -> dict[str, Any]:
+        raw_str = str(raw_key_val or "").strip()
+        base = key_identity_memo.get(raw_str)
+        if base is None:
+            if not raw_str:
+                base = {
+                    "key_hash": "anonymous",
+                    "api_key_prefix": "未关联 Key",
+                    "cfg_name": None,
+                    "cfg_group": None,
+                    "parent_name": None,
+                    "can_drilldown": False,
+                }
+            else:
+                meta = cfg_key_meta.get(raw_str) or {}
+                base = {
+                    "key_hash": _key_analytics_hash(raw_str),
+                    "api_key_prefix": _key_analytics_prefix(raw_str),
+                    "cfg_name": meta.get("name"),
+                    "cfg_group": meta.get("group"),
+                    "parent_name": meta.get("parent_name"),
+                    "can_drilldown": True,
+                }
+            key_identity_memo[raw_str] = base
+
+        resolved_name = base["cfg_name"] or (str(db_name).strip() if db_name else None) or None
+        resolved_group = base["cfg_group"] or (str(db_group).strip() if db_group else None) or None
+        label = resolved_name or base["api_key_prefix"]
+        return {
+            "key_hash": base["key_hash"],
+            "key_label": label,
+            "api_key_name": resolved_name,
+            "api_key_prefix": base["api_key_prefix"],
+            "api_key_group": resolved_group,
+            "parent_name": base["parent_name"],
+            "can_drilldown": base["can_drilldown"],
+        }
+
+    def _provider_matches(prov_name: str) -> bool:
+        if not filter_providers_raw:
+            return True
+        if prov_name in filter_providers_raw:
+            return True
+        return any(prov_name.startswith(fp + ":") for fp in filter_providers_raw)
+
+    def _key_matches(k_hash: str) -> bool:
+        if not filter_key_hashes:
+            return True
+        return k_hash in filter_key_hashes
+
+    rk = (range_key or "24h").strip().lower()
+    end_dt = now_utc
+    if start_datetime or end_datetime:
+        try:
+            start_dt = parse_datetime_input(start_datetime) if start_datetime else (now_utc - timedelta(hours=24))
+            end_dt = parse_datetime_input(end_datetime) if end_datetime else now_utc
+            if end_dt < start_dt:
+                start_dt, end_dt = end_dt, start_dt
+            span_h = max(1.0, (end_dt - start_dt).total_seconds() / 3600.0)
+            granularity = "hour" if span_h <= 96 else "day"
+        except Exception:
+            start_dt = now_utc - timedelta(hours=24)
+            granularity = "hour"
+    elif rk == "1h":
+        start_dt = now_utc - timedelta(hours=1)
+        granularity = "hour"
+    elif rk == "6h":
+        start_dt = now_utc - timedelta(hours=6)
+        granularity = "hour"
+    elif rk == "24h":
+        start_dt = now_utc - timedelta(hours=24)
+        granularity = "hour"
+    elif rk == "today":
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = start_local.astimezone(timezone.utc)
+        granularity = "hour"
+    elif rk == "3d":
+        start_dt = now_utc - timedelta(hours=72)
+        granularity = "hour"
+    elif rk in ("week", "7d"):
+        start_dt = now_utc - timedelta(hours=168)
+        granularity = "day"
+    elif rk == "month":
+        start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start_dt = start_local.astimezone(timezone.utc)
+        span_h = max(1.0, (now_utc - start_dt).total_seconds() / 3600.0)
+        granularity = "hour" if span_h <= 72 else "day"
+    elif rk == "30d":
+        start_dt = now_utc - timedelta(days=30)
+        granularity = "day"
+    elif rk == "all":
+        start_dt = None
+        granularity = "day"
+    else:
+        start_dt = now_utc - timedelta(hours=24)
+        granularity = "hour"
+    heatmap_start_local = (now_local - timedelta(days=364)).replace(hour=0, minute=0, second=0, microsecond=0)
+    heatmap_start_dt = heatmap_start_local.astimezone(timezone.utc)
+
+    # SQLite 本地时区偏移修饰符（分钟）
+    offset_total_minutes = int(local_offset.total_seconds() // 60)
+    sqlite_tz_mod = f"{offset_total_minutes:+d} minutes"
+
+    db_type = (DB_TYPE or "sqlite").lower()
+    def _row_cost_usd(prompt_tok: int, comp_tok: int, cached_tok: int, rec_cost: float, model_name: str, provider_name: str) -> float:
+        # 保持本地历史价格口径；零价（含估算 usage）不能用当前报价回填成实付费用。
+        return float(rec_cost or 0)
+
+    has_any_filter = bool(filter_models or filter_providers_raw or filter_key_hashes)
+    fetch_recent_limit = min(1000, recent_limit * 6 if has_any_filter else recent_limit)
+
+    def _matches_recent_or_lat(r: Mapping[str, Any]) -> bool:
+        m_val = str(r.get("model") or "unknown")
+        p_val = str(r.get("provider") or "unknown")
+        k_ident = _resolve_key_identity(r.get("api_key"), r.get("api_key_name"), r.get("api_key_group"))
+        if filter_models and m_val not in filter_models:
+            return False
+        if not _provider_matches(p_val):
+            return False
+        if not _key_matches(k_ident["key_hash"]):
+            return False
+        return True
+
+    bucket_fmt = "%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d"
+
+    if db_type == "d1":
+        from db import d1_client
+        if d1_client is None:
+            raise HTTPException(status_code=503, detail="D1 client is not initialized.")
+        if start_dt is None:
+            bounds_rows = await d1_client.query_all(
+                "SELECT MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts FROM request_stats"
+            )
+            min_ts_raw = bounds_rows[0].get("min_ts") if bounds_rows else None
+            if min_ts_raw:
+                parsed_min = parse_d1_datetime(min_ts_raw)
+                if parsed_min:
+                    start_dt = parsed_min
+                    if (end_dt - start_dt).total_seconds() <= 96 * 3600:
+                        granularity = "hour"
+                        bucket_fmt = "%Y-%m-%d %H:00"
+        if start_dt is None:
+            start_dt = now_utc - timedelta(days=30)
+
+        start_str = format_d1_datetime(start_dt)
+        end_str = format_d1_datetime(end_dt)
+        heatmap_start_str = format_d1_datetime(heatmap_start_dt)
+
+        ts_rows = await d1_client.query_all(
+            """
+            SELECT
+                strftime(?, timestamp, ?) AS bucket,
+                COALESCE(model, 'unknown') AS model,
+                COALESCE(provider, 'unknown') AS provider,
+                COALESCE(api_key, '') AS api_key,
+                MAX(api_key_name) AS api_key_name,
+                MAX(api_key_group) AS api_key_group,
+                MAX(timestamp) AS last_used,
+                COUNT(*) AS req_count,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS ok_count,
+                SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens,
+                SUM(COALESCE(completion_tokens, 0)) AS completion_tokens,
+                SUM(COALESCE(total_tokens, 0)) AS total_tokens,
+                SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens,
+                SUM((COALESCE(prompt_tokens, 0) * COALESCE(prompt_price, 0.0) + COALESCE(completion_tokens, 0) * COALESCE(completion_price, 0.0)) / 1000000.0) AS recorded_cost,
+                SUM(CASE WHEN process_time > 0 THEN process_time ELSE 0 END) AS sum_pt,
+                SUM(CASE WHEN process_time > 0 THEN 1 ELSE 0 END) AS cnt_pt,
+                SUM(CASE WHEN first_response_time > 0 THEN first_response_time ELSE 0 END) AS sum_frt,
+                SUM(CASE WHEN first_response_time > 0 THEN 1 ELSE 0 END) AS cnt_frt,
+                SUM(CASE WHEN completion_tokens > 0 AND process_time > 0 THEN completion_tokens ELSE 0 END) AS gen_comp_tokens,
+                SUM(CASE WHEN completion_tokens > 0 AND process_time > 0 THEN
+                    CASE WHEN first_response_time IS NOT NULL AND (process_time - first_response_time) >= 0.1
+                         THEN (process_time - first_response_time)
+                         ELSE process_time
+                    END
+                ELSE 0 END) AS gen_duration
+            FROM request_stats
+            WHERE timestamp >= ? AND timestamp <= ?
+            GROUP BY bucket, model, provider, COALESCE(api_key, '')
+            ORDER BY bucket ASC
+            """,
+            [bucket_fmt, sqlite_tz_mod, start_str, end_str],
+        )
+        lat_rows = await d1_client.query_all(
+            """
+            SELECT COALESCE(model, 'unknown') AS model,
+                   COALESCE(provider, 'unknown') AS provider,
+                   COALESCE(api_key, '') AS api_key,
+                   first_response_time,
+                   CASE WHEN completion_tokens > 0 AND process_time > 0 THEN
+                       CAST(completion_tokens AS REAL) / (
+                           CASE WHEN first_response_time IS NOT NULL AND (process_time - first_response_time) >= 0.1
+                                THEN (process_time - first_response_time)
+                                ELSE process_time
+                           END
+                       )
+                   ELSE 0 END AS req_speed
+            FROM request_stats
+            WHERE timestamp >= ? AND timestamp <= ?
+              AND (first_response_time > 0 OR (completion_tokens > 0 AND process_time > 0))
+            """,
+            [start_str, end_str],
+        )
+        recent_rows_all = await d1_client.query_all(
+            """
+            SELECT id, timestamp, model, provider, api_key, api_key_name, api_key_group,
+                   prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                   process_time, first_response_time, success, status_code
+            FROM request_stats
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            [start_str, end_str, fetch_recent_limit],
+        )
+        recent_rows = [r for r in recent_rows_all if _matches_recent_or_lat(r)][:recent_limit]
+        heatmap_rows = await d1_client.query_all(
+            """
+            SELECT
+                strftime('%Y-%m-%d', timestamp, ?) AS day,
+                COALESCE(model, 'unknown') AS model,
+                COALESCE(provider, 'unknown') AS provider,
+                COALESCE(api_key, '') AS api_key,
+                COUNT(*) AS req_count,
+                SUM(COALESCE(total_tokens, 0)) AS total_tokens
+            FROM request_stats
+            WHERE timestamp >= ?
+            GROUP BY day, model, provider, COALESCE(api_key, '')
+            ORDER BY day ASC
+            """,
+            [sqlite_tz_mod, heatmap_start_str],
+        )
+    else:
+        async with async_session_scope() as session:
+            from sqlalchemy import text as sa_text
+
+            # 若 range_key == 'all'，先探测最早一条记录时间以决定粒度（若总跨度 <= 96 小时则自动用小时粒度）
+            if start_dt is None:
+                bounds_row = (await session.execute(
+                    select(func.min(RequestStat.timestamp).label("min_ts"))
+                )).mappings().first()
+                min_ts_raw = bounds_row.get("min_ts") if bounds_row else None
+                if min_ts_raw:
+                    parsed_min = parse_d1_datetime(min_ts_raw)
+                    if parsed_min:
+                        start_dt = parsed_min
+                        if (end_dt - start_dt).total_seconds() <= 96 * 3600:
+                            granularity = "hour"
+                            bucket_fmt = "%Y-%m-%d %H:00"
+            if start_dt is None:
+                start_dt = now_utc - timedelta(days=30)
+
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            heatmap_start_str = heatmap_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            if db_type == "sqlite":
+                # 1) 按时间桶 + 模型 + 渠道 + API Key 聚合（走 idx_request_stats_dashboard_cover 覆盖索引，不触碰大 TEXT 字段）
+                ts_sql = sa_text("""
+                    SELECT
+                        strftime(:bucket_fmt, timestamp, :tz_mod) AS bucket,
+                        COALESCE(model, 'unknown') AS model,
+                        COALESCE(provider, 'unknown') AS provider,
+                        COALESCE(api_key, '') AS api_key,
+                        MAX(api_key_name) AS api_key_name,
+                        MAX(api_key_group) AS api_key_group,
+                        MAX(timestamp) AS last_used,
+                        COUNT(*) AS req_count,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS ok_count,
+                        SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens,
+                        SUM(COALESCE(completion_tokens, 0)) AS completion_tokens,
+                        SUM(COALESCE(total_tokens, 0)) AS total_tokens,
+                        SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                        SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens,
+                        SUM((COALESCE(prompt_tokens, 0) * COALESCE(prompt_price, 0.0) + COALESCE(completion_tokens, 0) * COALESCE(completion_price, 0.0)) / 1000000.0) AS recorded_cost,
+                        SUM(CASE WHEN process_time > 0 THEN process_time ELSE 0 END) AS sum_pt,
+                        SUM(CASE WHEN process_time > 0 THEN 1 ELSE 0 END) AS cnt_pt,
+                        SUM(CASE WHEN first_response_time > 0 THEN first_response_time ELSE 0 END) AS sum_frt,
+                        SUM(CASE WHEN first_response_time > 0 THEN 1 ELSE 0 END) AS cnt_frt,
+                        SUM(CASE WHEN completion_tokens > 0 AND process_time > 0 THEN completion_tokens ELSE 0 END) AS gen_comp_tokens,
+                        SUM(CASE WHEN completion_tokens > 0 AND process_time > 0 THEN
+                            CASE WHEN first_response_time IS NOT NULL AND (process_time - first_response_time) >= 0.1
+                                 THEN (process_time - first_response_time)
+                                 ELSE process_time
+                            END
+                        ELSE 0 END) AS gen_duration
+                    FROM request_stats
+                    WHERE timestamp >= :start_str AND timestamp <= :end_str
+                    GROUP BY bucket, model, provider, COALESCE(api_key, '')
+                    ORDER BY bucket ASC
+                """)
+                ts_rows = (await session.execute(ts_sql, {
+                    "bucket_fmt": bucket_fmt,
+                    "tz_mod": sqlite_tz_mod,
+                    "start_str": start_str,
+                    "end_str": end_str,
+                })).mappings().all()
+
+                # 2) 首字延迟分位数 p90 与单请求峰值吞吐查询（包含 model / provider / api_key 以支持前端全局过滤）
+                frt_sql = sa_text("""
+                    SELECT COALESCE(model, 'unknown') AS model,
+                           COALESCE(provider, 'unknown') AS provider,
+                           COALESCE(api_key, '') AS api_key,
+                           first_response_time,
+                           CASE WHEN completion_tokens > 0 AND process_time > 0 THEN
+                               CAST(completion_tokens AS REAL) / (
+                                   CASE WHEN first_response_time IS NOT NULL AND (process_time - first_response_time) >= 0.1
+                                        THEN (process_time - first_response_time)
+                                        ELSE process_time
+                                   END
+                               )
+                           ELSE 0 END AS req_speed
+                    FROM request_stats
+                    WHERE timestamp >= :start_str AND timestamp <= :end_str
+                      AND (first_response_time > 0 OR (completion_tokens > 0 AND process_time > 0))
+                """)
+                lat_rows = (await session.execute(frt_sql, {"start_str": start_str, "end_str": end_str})).mappings().all()
+
+                # 3) 最近请求实时活动流
+                recent_sql = sa_text("""
+                    SELECT id, timestamp, model, provider, api_key, api_key_name, api_key_group,
+                           prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                           process_time, first_response_time, success, status_code
+                    FROM request_stats
+                    WHERE timestamp >= :start_str AND timestamp <= :end_str
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT :limit
+                """)
+                recent_rows_all = (await session.execute(recent_sql, {
+                    "start_str": start_str,
+                    "end_str": end_str,
+                    "limit": fetch_recent_limit,
+                })).mappings().all()
+                recent_rows = [r for r in recent_rows_all if _matches_recent_or_lat(r)][:recent_limit]
+
+                # 4) 近一年每日活动热力图（按 day, model, provider, api_key 分组以支持全局过滤）
+                heatmap_sql = sa_text("""
+                    SELECT
+                        strftime('%Y-%m-%d', timestamp, :tz_mod) AS day,
+                        COALESCE(model, 'unknown') AS model,
+                        COALESCE(provider, 'unknown') AS provider,
+                        COALESCE(api_key, '') AS api_key,
+                        COUNT(*) AS req_count,
+                        SUM(COALESCE(total_tokens, 0)) AS total_tokens
+                    FROM request_stats
+                    WHERE timestamp >= :heatmap_start_str
+                    GROUP BY day, model, provider, COALESCE(api_key, '')
+                    ORDER BY day ASC
+                """)
+                heatmap_rows = (await session.execute(heatmap_sql, {
+                    "tz_mod": sqlite_tz_mod,
+                    "heatmap_start_str": heatmap_start_str,
+                })).mappings().all()
+            else:
+                # PostgreSQL / MySQL 兼容分支：仅拉取轻量标量列并在本地时区下完成聚合，不读取大 TEXT 请求体
+                raw_window_rows = (await session.execute(
+                    select(
+                        RequestStat.id,
+                        RequestStat.timestamp,
+                        RequestStat.model,
+                        RequestStat.provider,
+                        RequestStat.api_key,
+                        RequestStat.api_key_name,
+                        RequestStat.api_key_group,
+                        RequestStat.success,
+                        RequestStat.status_code,
+                        RequestStat.prompt_tokens,
+                        RequestStat.completion_tokens,
+                        RequestStat.total_tokens,
+                        RequestStat.cached_tokens,
+                        RequestStat.cache_creation_tokens,
+                        RequestStat.prompt_price,
+                        RequestStat.completion_price,
+                        RequestStat.process_time,
+                        RequestStat.first_response_time,
+                    )
+                    .where(RequestStat.timestamp >= start_dt, RequestStat.timestamp <= end_dt)
+                    .order_by(RequestStat.timestamp.desc(), RequestStat.id.desc())
+                )).mappings().all()
+
+                ts_agg: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+                lat_rows = []
+                recent_rows = []
+                for r in raw_window_rows:
+                    ts_dt = parse_d1_datetime(r.get("timestamp")) or start_dt
+                    local_dt = ts_dt.astimezone(local_tz)
+                    b_str = local_dt.strftime(bucket_fmt)
+                    m_str = str(r.get("model") or "unknown")
+                    p_str = str(r.get("provider") or "unknown")
+                    k_str = str(r.get("api_key") or "")
+                    pt = _safe_float(r.get("process_time"))
+                    frt = _safe_float(r.get("first_response_time"))
+                    ptok = _safe_int(r.get("prompt_tokens"))
+                    ctok = _safe_int(r.get("completion_tokens"))
+                    ttok = _safe_int(r.get("total_tokens")) or (ptok + ctok)
+                    catok = _safe_int(r.get("cached_tokens"))
+                    cctok = _safe_int(r.get("cache_creation_tokens"))
+                    p_price = _safe_float(r.get("prompt_price"))
+                    c_price = _safe_float(r.get("completion_price"))
+                    ok_flag = 1 if _bool_from_db(r.get("success")) else 0
+                    gen_dur = (pt - frt) if (frt > 0 and (pt - frt) >= 0.1) else pt
+
+                    g_key = (b_str, m_str, p_str, k_str)
+                    g = ts_agg.get(g_key)
+                    if g is None:
+                        g = {
+                            "bucket": b_str,
+                            "model": m_str,
+                            "provider": p_str,
+                            "api_key": k_str,
+                            "api_key_name": r.get("api_key_name"),
+                            "api_key_group": r.get("api_key_group"),
+                            "last_used": ts_dt.isoformat(),
+                            "req_count": 0,
+                            "ok_count": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "cached_tokens": 0,
+                            "cache_creation_tokens": 0,
+                            "recorded_cost": 0.0,
+                            "sum_pt": 0.0,
+                            "cnt_pt": 0,
+                            "sum_frt": 0.0,
+                            "cnt_frt": 0,
+                            "gen_comp_tokens": 0,
+                            "gen_duration": 0.0,
+                        }
+                        ts_agg[g_key] = g
+                    if not g["api_key_name"] and r.get("api_key_name"):
+                        g["api_key_name"] = r.get("api_key_name")
+                    if not g["api_key_group"] and r.get("api_key_group"):
+                        g["api_key_group"] = r.get("api_key_group")
+                    g["req_count"] += 1
+                    g["ok_count"] += ok_flag
+                    g["prompt_tokens"] += ptok
+                    g["completion_tokens"] += ctok
+                    g["total_tokens"] += ttok
+                    g["cached_tokens"] += catok
+                    g["cache_creation_tokens"] += cctok
+                    g["recorded_cost"] += (ptok * p_price + ctok * c_price) / 1_000_000.0
+                    if pt > 0:
+                        g["sum_pt"] += pt
+                        g["cnt_pt"] += 1
+                    if frt > 0:
+                        g["sum_frt"] += frt
+                        g["cnt_frt"] += 1
+                    if ctok > 0 and pt > 0 and gen_dur > 0:
+                        g["gen_comp_tokens"] += ctok
+                        g["gen_duration"] += gen_dur
+
+                    if frt > 0 or (ctok > 0 and pt > 0 and gen_dur > 0):
+                        lat_rows.append({
+                            "model": m_str,
+                            "provider": p_str,
+                            "api_key": k_str,
+                            "first_response_time": frt,
+                            "req_speed": (ctok / gen_dur) if (ctok > 0 and pt > 0 and gen_dur > 0) else 0.0,
+                        })
+                    if len(recent_rows) < recent_limit and _matches_recent_or_lat(r):
+                        recent_rows.append(r)
+
+                ts_rows = sorted(ts_agg.values(), key=lambda x: x["bucket"])
+
+                raw_hm_rows = (await session.execute(
+                    select(
+                        RequestStat.timestamp,
+                        RequestStat.model,
+                        RequestStat.provider,
+                        RequestStat.api_key,
+                        RequestStat.total_tokens,
+                    ).where(RequestStat.timestamp >= heatmap_start_dt)
+                )).mappings().all()
+                hm_agg: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+                for hr in raw_hm_rows:
+                    ts_dt = parse_d1_datetime(hr.get("timestamp"))
+                    if not ts_dt:
+                        continue
+                    day_str = ts_dt.astimezone(local_tz).strftime("%Y-%m-%d")
+                    m_str = str(hr.get("model") or "unknown")
+                    p_str = str(hr.get("provider") or "unknown")
+                    k_str = str(hr.get("api_key") or "")
+                    hk = (day_str, m_str, p_str, k_str)
+                    he = hm_agg.get(hk)
+                    if he is None:
+                        he = {
+                            "day": day_str,
+                            "model": m_str,
+                            "provider": p_str,
+                            "api_key": k_str,
+                            "req_count": 0,
+                            "total_tokens": 0,
+                        }
+                        hm_agg[hk] = he
+                    he["req_count"] += 1
+                    he["total_tokens"] += _safe_int(hr.get("total_tokens"))
+                heatmap_rows = list(hm_agg.values())
+
+    # 先基于未过滤的 ts_rows 计算当前时间窗口内全量可选模型、可选渠道与可选 API Key（供顶部全局筛选器展示）
+    all_models_meta: dict[str, dict[str, Any]] = {}
+    all_providers_meta: dict[str, dict[str, Any]] = {}
+    all_keys_meta: dict[str, dict[str, Any]] = {}
+    for r in ts_rows:
+        m = str(r.get("model") or "unknown")
+        p = str(r.get("provider") or "unknown")
+        k_ident = _resolve_key_identity(r.get("api_key"), r.get("api_key_name"), r.get("api_key_group"))
+        k_hash = k_ident["key_hash"]
+        rc = _safe_int(r.get("req_count"))
+        ok = _safe_int(r.get("ok_count"))
+        ptok = _safe_int(r.get("prompt_tokens"))
+        ctok = _safe_int(r.get("completion_tokens"))
+        ttok = _safe_int(r.get("total_tokens")) or (ptok + ctok)
+        catok = _safe_int(r.get("cached_tokens"))
+        rec_c = _safe_float(r.get("recorded_cost"))
+        row_cost = _row_cost_usd(ptok, ctok, catok, rec_c, m, p)
+        g_comp = _safe_int(r.get("gen_comp_tokens"))
+        g_dur = _safe_float(r.get("gen_duration"))
+
+        mm = all_models_meta.setdefault(m, {"model": m, "requests": 0, "prompt_tokens": 0, "total_tokens": 0, "cached_tokens": 0, "gen_comp": 0, "gen_dur": 0.0})
+        mm["requests"] += rc
+        mm["prompt_tokens"] += ptok
+        mm["total_tokens"] += ttok
+        mm["cached_tokens"] += catok
+        mm["gen_comp"] += g_comp
+        mm["gen_dur"] += g_dur
+
+        pm = all_providers_meta.setdefault(p, {"provider": p, "requests": 0, "ok": 0, "prompt_tokens": 0, "total_tokens": 0, "cached_tokens": 0})
+        pm["requests"] += rc
+        pm["ok"] += ok
+        pm["prompt_tokens"] += ptok
+        pm["total_tokens"] += ttok
+        pm["cached_tokens"] += catok
+
+        km = all_keys_meta.get(k_hash)
+        if km is None:
+            km = {
+                "key_hash": k_hash,
+                "key_label": k_ident["key_label"],
+                "api_key_name": k_ident["api_key_name"],
+                "api_key_prefix": k_ident["api_key_prefix"],
+                "api_key_group": k_ident["api_key_group"],
+                "parent_name": k_ident["parent_name"],
+                "can_drilldown": k_ident["can_drilldown"],
+                "requests": 0,
+                "ok": 0,
+                "prompt_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+                "cost_usd": 0.0,
+            }
+            all_keys_meta[k_hash] = km
+        elif not km["api_key_name"] and k_ident["api_key_name"]:
+            km["api_key_name"] = k_ident["api_key_name"]
+            km["key_label"] = k_ident["key_label"]
+        if not km["api_key_group"] and k_ident["api_key_group"]:
+            km["api_key_group"] = k_ident["api_key_group"]
+        km["requests"] += rc
+        km["ok"] += ok
+        km["prompt_tokens"] += ptok
+        km["total_tokens"] += ttok
+        km["cached_tokens"] += catok
+        km["cost_usd"] += row_cost
+
+    available_models = sorted([
+        {
+            "model": v["model"],
+            "requests": v["requests"],
+            "total_tokens": v["total_tokens"],
+            "cache_hit_rate": round(min(100.0, v["cached_tokens"] / v["prompt_tokens"] * 100), 1) if v["prompt_tokens"] > 0 else 0.0,
+            "speed_tok_s": round(v["gen_comp"] / v["gen_dur"], 1) if v["gen_dur"] > 0 else 0.0,
+        }
+        for v in all_models_meta.values() if v["model"] and v["model"] != "unknown"
+    ], key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+
+    available_providers = sorted([
+        {
+            "provider": v["provider"],
+            "requests": v["requests"],
+            "total_tokens": v["total_tokens"],
+            "success_rate": round(v["ok"] / v["requests"] * 100, 1) if v["requests"] > 0 else 0.0,
+            "cache_hit_rate": round(min(100.0, v["cached_tokens"] / v["prompt_tokens"] * 100), 1) if v["prompt_tokens"] > 0 else 0.0,
+        }
+        for v in all_providers_meta.values() if v["provider"] and v["provider"] != "unknown"
+    ], key=lambda x: (x["requests"], x["total_tokens"]), reverse=True)
+
+    available_keys = sorted([
+        {
+            "key_hash": v["key_hash"],
+            "key_label": v["key_label"],
+            "api_key_name": v["api_key_name"],
+            "api_key_prefix": v["api_key_prefix"],
+            "api_key_group": v["api_key_group"],
+            "parent_name": v["parent_name"],
+            "can_drilldown": v["can_drilldown"],
+            "requests": v["requests"],
+            "total_tokens": v["total_tokens"],
+            "success_rate": round(v["ok"] / v["requests"] * 100, 1) if v["requests"] > 0 else 0.0,
+            "cache_hit_rate": round(min(100.0, v["cached_tokens"] / v["prompt_tokens"] * 100), 1) if v["prompt_tokens"] > 0 else 0.0,
+            "cost_usd": round(v["cost_usd"], 4),
+            "cost_cny": round(v["cost_usd"] * 7.25, 2),
+        }
+        for v in all_keys_meta.values()
+    ], key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+
+    # 聚合计算过滤后的 summary、timeseries、model_timeseries、key_timeseries 及多维 breakdown
+    bucket_map: dict[str, dict[str, Any]] = {}
+    bucket_model_map: dict[str, dict[str, dict[str, int]]] = {}
+    bucket_key_map: dict[str, dict[str, dict[str, int]]] = {}
+    model_map: dict[str, dict[str, Any]] = {}
+    provider_map: dict[str, dict[str, Any]] = {}
+    key_map: dict[str, dict[str, Any]] = {}
+    cross_map: dict[tuple[str, str], dict[str, Any]] = {}
+    key_model_map: dict[tuple[str, str], dict[str, Any]] = {}
+
+    tot_req = 0
+    tot_ok = 0
+    tot_prompt = 0
+    tot_comp = 0
+    tot_tokens = 0
+    tot_cached = 0
+    tot_cache_create = 0
+    tot_cost_usd = 0.0
+    tot_rec_cost_usd = 0.0
+    tot_sum_pt = 0.0
+    tot_cnt_pt = 0
+    tot_sum_frt = 0.0
+    tot_cnt_frt = 0
+    tot_gen_comp = 0
+    tot_gen_dur = 0.0
+
+    for r in ts_rows:
+        b = str(r.get("bucket") or "")
+        m = str(r.get("model") or "unknown")
+        p = str(r.get("provider") or "unknown")
+        k_ident = _resolve_key_identity(r.get("api_key"), r.get("api_key_name"), r.get("api_key_group"))
+        k_hash = k_ident["key_hash"]
+        if filter_models and m not in filter_models:
+            continue
+        if not _provider_matches(p):
+            continue
+        if not _key_matches(k_hash):
+            continue
+        rc = _safe_int(r.get("req_count"))
+        ok = _safe_int(r.get("ok_count"))
+        ptok = _safe_int(r.get("prompt_tokens"))
+        ctok = _safe_int(r.get("completion_tokens"))
+        ttok = _safe_int(r.get("total_tokens")) or (ptok + ctok)
+        catok = _safe_int(r.get("cached_tokens"))
+        cctok = _safe_int(r.get("cache_creation_tokens"))
+        rec_c = _safe_float(r.get("recorded_cost"))
+        row_cost = _row_cost_usd(ptok, ctok, catok, rec_c, m, p)
+        s_pt = _safe_float(r.get("sum_pt"))
+        c_pt = _safe_int(r.get("cnt_pt"))
+        s_frt = _safe_float(r.get("sum_frt"))
+        c_frt = _safe_int(r.get("cnt_frt"))
+        g_comp = _safe_int(r.get("gen_comp_tokens"))
+        g_dur = _safe_float(r.get("gen_duration"))
+        row_last_used = _stringify_datetime(r.get("last_used"))
+
+        tot_req += rc
+        tot_ok += ok
+        tot_prompt += ptok
+        tot_comp += ctok
+        tot_tokens += ttok
+        tot_cached += catok
+        tot_cache_create += cctok
+        tot_cost_usd += row_cost
+        tot_rec_cost_usd += rec_c
+        tot_sum_pt += s_pt
+        tot_cnt_pt += c_pt
+        tot_sum_frt += s_frt
+        tot_cnt_frt += c_frt
+        tot_gen_comp += g_comp
+        tot_gen_dur += g_dur
+
+        if b:
+            b_entry = bucket_map.setdefault(b, {
+                "bucket": b,
+                "requests": 0,
+                "success_requests": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+                "cost_usd": 0.0,
+                "sum_pt": 0.0,
+                "cnt_pt": 0,
+                "sum_frt": 0.0,
+                "cnt_frt": 0,
+                "gen_comp": 0,
+                "gen_dur": 0.0,
+            })
+            b_entry["requests"] += rc
+            b_entry["success_requests"] += ok
+            b_entry["prompt_tokens"] += ptok
+            b_entry["completion_tokens"] += ctok
+            b_entry["total_tokens"] += ttok
+            b_entry["cached_tokens"] += catok
+            b_entry["cost_usd"] += row_cost
+            b_entry["sum_pt"] += s_pt
+            b_entry["cnt_pt"] += c_pt
+            b_entry["sum_frt"] += s_frt
+            b_entry["cnt_frt"] += c_frt
+            b_entry["gen_comp"] += g_comp
+            b_entry["gen_dur"] += g_dur
+
+        m_entry = model_map.setdefault(m, {
+            "model": m,
+            "requests": 0,
+            "success_requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cost_usd": 0.0,
+            "sum_pt": 0.0,
+            "cnt_pt": 0,
+            "sum_frt": 0.0,
+            "cnt_frt": 0,
+            "gen_comp": 0,
+            "gen_dur": 0.0,
+        })
+        m_entry["requests"] += rc
+        m_entry["success_requests"] += ok
+        m_entry["prompt_tokens"] += ptok
+        m_entry["completion_tokens"] += ctok
+        m_entry["total_tokens"] += ttok
+        m_entry["cached_tokens"] += catok
+        m_entry["cost_usd"] += row_cost
+        m_entry["sum_pt"] += s_pt
+        m_entry["cnt_pt"] += c_pt
+        m_entry["sum_frt"] += s_frt
+        m_entry["cnt_frt"] += c_frt
+        m_entry["gen_comp"] += g_comp
+        m_entry["gen_dur"] += g_dur
+
+        p_entry = provider_map.setdefault(p, {
+            "provider": p,
+            "requests": 0,
+            "success_requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cost_usd": 0.0,
+            "sum_pt": 0.0,
+            "cnt_pt": 0,
+            "sum_frt": 0.0,
+            "cnt_frt": 0,
+            "gen_comp": 0,
+            "gen_dur": 0.0,
+        })
+        p_entry["requests"] += rc
+        p_entry["success_requests"] += ok
+        p_entry["prompt_tokens"] += ptok
+        p_entry["completion_tokens"] += ctok
+        p_entry["total_tokens"] += ttok
+        p_entry["cached_tokens"] += catok
+        p_entry["cost_usd"] += row_cost
+        p_entry["sum_pt"] += s_pt
+        p_entry["cnt_pt"] += c_pt
+        p_entry["sum_frt"] += s_frt
+        p_entry["cnt_frt"] += c_frt
+        p_entry["gen_comp"] += g_comp
+        p_entry["gen_dur"] += g_dur
+
+        k_entry = key_map.get(k_hash)
+        if k_entry is None:
+            k_entry = {
+                "key_hash": k_hash,
+                "key_label": k_ident["key_label"],
+                "api_key_name": k_ident["api_key_name"],
+                "api_key_prefix": k_ident["api_key_prefix"],
+                "api_key_group": k_ident["api_key_group"],
+                "parent_name": k_ident["parent_name"],
+                "can_drilldown": k_ident["can_drilldown"],
+                "requests": 0,
+                "success_requests": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+                "recorded_cost_usd": 0.0,
+                "cost_usd": 0.0,
+                "sum_pt": 0.0,
+                "cnt_pt": 0,
+                "sum_frt": 0.0,
+                "cnt_frt": 0,
+                "gen_comp": 0,
+                "gen_dur": 0.0,
+                "model_tokens": {},
+                "last_used": row_last_used,
+            }
+            key_map[k_hash] = k_entry
+        else:
+            if not k_entry["api_key_name"] and k_ident["api_key_name"]:
+                k_entry["api_key_name"] = k_ident["api_key_name"]
+                k_entry["key_label"] = k_ident["key_label"]
+            if not k_entry["api_key_group"] and k_ident["api_key_group"]:
+                k_entry["api_key_group"] = k_ident["api_key_group"]
+            if row_last_used and (not k_entry["last_used"] or row_last_used > k_entry["last_used"]):
+                k_entry["last_used"] = row_last_used
+        k_entry["requests"] += rc
+        k_entry["success_requests"] += ok
+        k_entry["prompt_tokens"] += ptok
+        k_entry["completion_tokens"] += ctok
+        k_entry["total_tokens"] += ttok
+        k_entry["cached_tokens"] += catok
+        k_entry["recorded_cost_usd"] += rec_c
+        k_entry["cost_usd"] += row_cost
+        k_entry["sum_pt"] += s_pt
+        k_entry["cnt_pt"] += c_pt
+        k_entry["sum_frt"] += s_frt
+        k_entry["cnt_frt"] += c_frt
+        k_entry["gen_comp"] += g_comp
+        k_entry["gen_dur"] += g_dur
+        if m and m != "unknown":
+            k_entry["model_tokens"][m] = k_entry["model_tokens"].get(m, 0) + ttok
+
+        if b:
+            bm = bucket_model_map.setdefault(b, {}).setdefault(m, {"requests": 0, "tokens": 0})
+            bm["requests"] += rc
+            bm["tokens"] += ttok
+            bk = bucket_key_map.setdefault(b, {}).setdefault(k_hash, {"requests": 0, "tokens": 0})
+            bk["requests"] += rc
+            bk["tokens"] += ttok
+
+        c_entry = cross_map.setdefault((p, m), {
+            "provider": p,
+            "model": m,
+            "requests": 0,
+            "success_requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "recorded_cost_usd": 0.0,
+            "cost_usd": 0.0,
+            "gen_comp": 0,
+            "gen_dur": 0.0,
+        })
+        c_entry["requests"] += rc
+        c_entry["success_requests"] += ok
+        c_entry["prompt_tokens"] += ptok
+        c_entry["completion_tokens"] += ctok
+        c_entry["total_tokens"] += ttok
+        c_entry["cached_tokens"] += catok
+        c_entry["recorded_cost_usd"] += rec_c
+        c_entry["cost_usd"] += row_cost
+        c_entry["gen_comp"] += g_comp
+        c_entry["gen_dur"] += g_dur
+
+        km_entry = key_model_map.setdefault((k_hash, m), {
+            "key_hash": k_hash,
+            "key_label": k_ident["key_label"],
+            "api_key_name": k_ident["api_key_name"],
+            "api_key_prefix": k_ident["api_key_prefix"],
+            "api_key_group": k_ident["api_key_group"],
+            "parent_name": k_ident["parent_name"],
+            "can_drilldown": k_ident["can_drilldown"],
+            "model": m,
+            "requests": 0,
+            "success_requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "recorded_cost_usd": 0.0,
+            "cost_usd": 0.0,
+            "gen_comp": 0,
+            "gen_dur": 0.0,
+        })
+        if not km_entry["api_key_name"] and k_ident["api_key_name"]:
+            km_entry["api_key_name"] = k_ident["api_key_name"]
+            km_entry["key_label"] = k_ident["key_label"]
+        km_entry["requests"] += rc
+        km_entry["success_requests"] += ok
+        km_entry["prompt_tokens"] += ptok
+        km_entry["completion_tokens"] += ctok
+        km_entry["total_tokens"] += ttok
+        km_entry["cached_tokens"] += catok
+        km_entry["recorded_cost_usd"] += rec_c
+        km_entry["cost_usd"] += row_cost
+        km_entry["gen_comp"] += g_comp
+        km_entry["gen_dur"] += g_dur
+
+    filtered_lat_rows = [r for r in lat_rows if _matches_recent_or_lat(r)]
+    frt_list = sorted([_safe_float(r.get("first_response_time")) for r in filtered_lat_rows if _safe_float(r.get("first_response_time")) > 0])
+    speed_list = sorted([_safe_float(r.get("req_speed")) for r in filtered_lat_rows if 0 < _safe_float(r.get("req_speed")) < 2000])
+    recent_total = tot_req
+
+    p90_frt = frt_list[min(len(frt_list) - 1, int(len(frt_list) * 0.9))] if frt_list else 0.0
+    p95_speed = speed_list[min(len(speed_list) - 1, int(len(speed_list) * 0.95))] if speed_list else 0.0
+    avg_speed = (tot_gen_comp / tot_gen_dur) if tot_gen_dur > 0 else (sum(speed_list) / len(speed_list) if speed_list else 0.0)
+
+    timeseries = []
+    peak_bucket_speed = 0.0
+    for b_key in sorted(bucket_map.keys()):
+        item = bucket_map[b_key]
+        reqs = item["requests"]
+        oks = item["success_requests"]
+        ptok = item["prompt_tokens"]
+        catok = item["cached_tokens"]
+        spd = (item["gen_comp"] / item["gen_dur"]) if item["gen_dur"] > 0 else 0.0
+        if spd > peak_bucket_speed:
+            peak_bucket_speed = spd
+        short_label = b_key[-5:] if granularity == "hour" and len(b_key) >= 16 else b_key[-5:]
+        timeseries.append({
+            "bucket": b_key,
+            "label": short_label,
+            "requests": reqs,
+            "success_requests": oks,
+            "failed_requests": max(0, reqs - oks),
+            "success_rate": round(oks / reqs * 100, 2) if reqs > 0 else 100.0,
+            "prompt_tokens": ptok,
+            "completion_tokens": item["completion_tokens"],
+            "total_tokens": item["total_tokens"],
+            "cached_tokens": catok,
+            "uncached_tokens": max(0, ptok - catok),
+            "cache_hit_rate": round(min(100.0, catok / ptok * 100), 2) if ptok > 0 else 0.0,
+            "speed_tok_s": round(spd, 1),
+            "avg_process_time": round(item["sum_pt"] / item["cnt_pt"], 2) if item["cnt_pt"] > 0 else 0.0,
+            "avg_ttft": round(item["sum_frt"] / item["cnt_frt"], 2) if item["cnt_frt"] > 0 else 0.0,
+            "cost_usd": round(item["cost_usd"], 4),
+            "cost_cny": round(item["cost_usd"] * 7.25, 2),
+        })
+
+    def _finalize_breakdown(entries: list[dict[str, Any]], key_name: str) -> list[dict[str, Any]]:
+        out = []
+        for e in entries:
+            reqs = e["requests"]
+            oks = e["success_requests"]
+            ptok = e["prompt_tokens"]
+            catok = e["cached_tokens"]
+            spd = (e["gen_comp"] / e["gen_dur"]) if e["gen_dur"] > 0 else 0.0
+            out.append({
+                key_name: e[key_name],
+                "requests": reqs,
+                "success_requests": oks,
+                "failed_requests": max(0, reqs - oks),
+                "success_rate": round(oks / reqs * 100, 2) if reqs > 0 else 0.0,
+                "prompt_tokens": ptok,
+                "completion_tokens": e["completion_tokens"],
+                "total_tokens": e["total_tokens"],
+                "cached_tokens": catok,
+                "cache_hit_rate": round(min(100.0, catok / ptok * 100), 1) if ptok > 0 else 0.0,
+                "speed_tok_s": round(spd, 1),
+                "avg_process_time": round(e["sum_pt"] / item_or_one(e["cnt_pt"]), 2) if e["cnt_pt"] > 0 else 0.0,
+                "avg_ttft": round(e["sum_frt"] / item_or_one(e["cnt_frt"]), 2) if e["cnt_frt"] > 0 else 0.0,
+                "cost_usd": round(e["cost_usd"], 4),
+                "cost_cny": round(e["cost_usd"] * 7.25, 2),
+                "token_share": round(e["total_tokens"] / tot_tokens * 100, 2) if tot_tokens > 0 else 0.0,
+            })
+        out.sort(key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+        return out
+
+    def item_or_one(v: int) -> int:
+        return v if v > 0 else 1
+
+    key_breakdown = []
+    for ke in key_map.values():
+        reqs = ke["requests"]
+        oks = ke["success_requests"]
+        ptok = ke["prompt_tokens"]
+        catok = ke["cached_tokens"]
+        spd = (ke["gen_comp"] / ke["gen_dur"]) if ke["gen_dur"] > 0 else 0.0
+        m_toks: dict[str, int] = ke["model_tokens"]
+        top_m = max(m_toks.items(), key=lambda kv: kv[1])[0] if m_toks else "-"
+        key_breakdown.append({
+            "key_hash": ke["key_hash"],
+            "key_label": ke["key_label"],
+            "api_key_name": ke["api_key_name"],
+            "api_key_prefix": ke["api_key_prefix"],
+            "api_key_group": ke["api_key_group"],
+            "parent_name": ke["parent_name"],
+            "can_drilldown": ke["can_drilldown"],
+            "requests": reqs,
+            "success_requests": oks,
+            "failed_requests": max(0, reqs - oks),
+            "success_rate": round(oks / reqs * 100, 2) if reqs > 0 else 0.0,
+            "prompt_tokens": ptok,
+            "completion_tokens": ke["completion_tokens"],
+            "total_tokens": ke["total_tokens"],
+            "cached_tokens": catok,
+            "uncached_tokens": max(0, ptok - catok),
+            "cache_hit_rate": round(min(100.0, catok / ptok * 100), 1) if ptok > 0 else 0.0,
+            "speed_tok_s": round(spd, 1),
+            "avg_process_time": round(ke["sum_pt"] / ke["cnt_pt"], 2) if ke["cnt_pt"] > 0 else 0.0,
+            "avg_ttft": round(ke["sum_frt"] / ke["cnt_frt"], 2) if ke["cnt_frt"] > 0 else 0.0,
+            "recorded_cost_usd": round(ke["recorded_cost_usd"], 4),
+            "cost_usd": round(ke["cost_usd"], 4),
+            "cost_cny": round(ke["cost_usd"] * 7.25, 2),
+            "token_share": round(ke["total_tokens"] / tot_tokens * 100, 2) if tot_tokens > 0 else 0.0,
+            "cost_share": round(ke["cost_usd"] / tot_cost_usd * 100, 2) if tot_cost_usd > 0 else 0.0,
+            "unique_models": len(m_toks),
+            "top_model": top_m,
+            "last_used": ke["last_used"],
+        })
+    key_breakdown.sort(key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+
+    recent_list = []
+    for r in recent_rows:
+        pt = _safe_float(r.get("process_time"))
+        frt = _safe_float(r.get("first_response_time"))
+        ctok = _safe_int(r.get("completion_tokens"))
+        ptok = _safe_int(r.get("prompt_tokens"))
+        ttok = _safe_int(r.get("total_tokens")) or (ptok + ctok)
+        gen_d = (pt - frt) if (frt > 0 and (pt - frt) >= 0.1) else pt
+        spd = round(ctok / gen_d, 1) if (ctok > 0 and gen_d > 0) else 0.0
+        k_ident = _resolve_key_identity(r.get("api_key"), r.get("api_key_name"), r.get("api_key_group"))
+        recent_list.append({
+            "id": _safe_int(r.get("id")),
+            "timestamp": _stringify_datetime(r.get("timestamp")),
+            "model": r.get("model") or "unknown",
+            "provider": r.get("provider") or "unknown",
+            "key_hash": k_ident["key_hash"],
+            "key_label": k_ident["key_label"],
+            "api_key_prefix": k_ident["api_key_prefix"],
+            "api_key_group": k_ident["api_key_group"],
+            "can_drilldown": k_ident["can_drilldown"],
+            "prompt_tokens": ptok,
+            "completion_tokens": ctok,
+            "total_tokens": ttok,
+            "cached_tokens": _safe_int(r.get("cached_tokens")),
+            "process_time": round(pt, 2),
+            "first_response_time": round(frt, 2),
+            "speed_tok_s": spd,
+            "success": _bool_from_db(r.get("success")),
+            "status_code": _safe_int(r.get("status_code")) or (200 if _bool_from_db(r.get("success")) else 500),
+        })
+
+    heatmap_by_day: dict[str, dict[str, int]] = {}
+    for r in heatmap_rows:
+        d_key = str(r.get("day") or "")
+        if not d_key:
+            continue
+        m_name = str(r.get("model") or "unknown")
+        p_name = str(r.get("provider") or "unknown")
+        k_ident = _resolve_key_identity(r.get("api_key"))
+        if filter_models and m_name not in filter_models:
+            continue
+        if not _provider_matches(p_name):
+            continue
+        if not _key_matches(k_ident["key_hash"]):
+            continue
+        slot = heatmap_by_day.setdefault(d_key, {"requests": 0, "total_tokens": 0})
+        slot["requests"] += _safe_int(r.get("req_count"))
+        slot["total_tokens"] += _safe_int(r.get("total_tokens"))
+    heatmap_days = []
+    hm_active_days = 0
+    hm_total_reqs = 0
+    hm_total_tokens = 0
+    hm_peak_reqs = 0
+    hm_peak_date = ""
+    for i in range(365):
+        d_local = (heatmap_start_local + timedelta(days=i)).date()
+        d_str = d_local.isoformat()
+        info = heatmap_by_day.get(d_str, {"requests": 0, "total_tokens": 0})
+        reqs = info["requests"]
+        toks = info["total_tokens"]
+        if reqs > 0:
+            hm_active_days += 1
+            hm_total_reqs += reqs
+            hm_total_tokens += toks
+            if reqs >= hm_peak_reqs:
+                hm_peak_reqs = reqs
+                hm_peak_date = d_str[5:]
+        heatmap_days.append({
+            "date": d_str,
+            "requests": reqs,
+            "total_tokens": toks,
+        })
+
+    summary = {
+        "range_key": rk,
+        "granularity": granularity,
+        "start_datetime": start_dt.isoformat(),
+        "end_datetime": end_dt.isoformat(),
+        "total_tokens": tot_tokens,
+        "prompt_tokens": tot_prompt,
+        "completion_tokens": tot_comp,
+        "cached_tokens": tot_cached,
+        "cache_creation_tokens": tot_cache_create,
+        "uncached_tokens": max(0, tot_prompt - tot_cached),
+        "cache_hit_rate": round(min(100.0, tot_cached / tot_prompt * 100), 2) if tot_prompt > 0 else 0.0,
+        "total_requests": tot_req,
+        "success_requests": tot_ok,
+        "failed_requests": max(0, tot_req - tot_ok),
+        "success_rate": round(tot_ok / tot_req * 100, 2) if tot_req > 0 else 0.0,
+        "avg_speed_tok_s": round(avg_speed, 1),
+        "peak_speed_tok_s": round(max(peak_bucket_speed, p95_speed), 1),
+        "avg_process_time": round(tot_sum_pt / tot_cnt_pt, 2) if tot_cnt_pt > 0 else 0.0,
+        "avg_first_response_time": round(tot_sum_frt / tot_cnt_frt, 2) if tot_cnt_frt > 0 else 0.0,
+        "p90_first_response_time": round(p90_frt, 2),
+        "total_cost_usd": round(tot_cost_usd, 4),
+        "total_cost_cny": round(tot_cost_usd * 7.25, 2),
+        "recorded_cost_usd": round(tot_rec_cost_usd, 4),
+        "active_keys": len(key_breakdown),
+    }
+
+    final_models = _finalize_breakdown(list(model_map.values()), "model")
+    final_providers = _finalize_breakdown(list(provider_map.values()), "provider")
+    top_models = [m["model"] for m in final_models[:8] if m.get("model")]
+    top_keys = [
+        {"key_hash": k["key_hash"], "key_label": k["key_label"]}
+        for k in key_breakdown[:8]
+        if k.get("key_hash")
+    ]
+
+    model_timeseries = []
+    key_timeseries = []
+    for b_key in sorted(bucket_map.keys()):
+        short_label = b_key[-5:] if granularity == "hour" and len(b_key) >= 16 else b_key[-5:]
+        row_obj: dict[str, Any] = {"bucket": b_key, "label": short_label}
+        per_m = bucket_model_map.get(b_key, {})
+        for tm in top_models:
+            row_obj[tm] = per_m.get(tm, {}).get("requests", 0)
+            row_obj[f"{tm}__tokens"] = per_m.get(tm, {}).get("tokens", 0)
+        model_timeseries.append(row_obj)
+
+        k_row_obj: dict[str, Any] = {"bucket": b_key, "label": short_label}
+        per_k = bucket_key_map.get(b_key, {})
+        for tk in top_keys:
+            kh = tk["key_hash"]
+            k_row_obj[kh] = per_k.get(kh, {}).get("requests", 0)
+            k_row_obj[f"{kh}__tokens"] = per_k.get(kh, {}).get("tokens", 0)
+        key_timeseries.append(k_row_obj)
+
+    cross_breakdown = []
+    for ce in cross_map.values():
+        reqs = ce["requests"]
+        oks = ce["success_requests"]
+        ptok = ce["prompt_tokens"]
+        catok = ce["cached_tokens"]
+        spd = (ce["gen_comp"] / ce["gen_dur"]) if ce["gen_dur"] > 0 else 0.0
+        cross_breakdown.append({
+            "provider": ce["provider"],
+            "model": ce["model"],
+            "requests": reqs,
+            "success_rate": round(oks / reqs * 100, 1) if reqs > 0 else 0.0,
+            "prompt_tokens": ptok,
+            "completion_tokens": ce["completion_tokens"],
+            "total_tokens": ce["total_tokens"],
+            "cached_tokens": catok,
+            "cache_hit_rate": round(min(100.0, catok / ptok * 100), 1) if ptok > 0 else 0.0,
+            "speed_tok_s": round(spd, 1),
+            "recorded_cost_usd": round(ce["recorded_cost_usd"], 4),
+            "cost_usd": round(ce["cost_usd"], 4),
+            "cost_cny": round(ce["cost_usd"] * 7.25, 2),
+        })
+    cross_breakdown.sort(key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+
+    key_model_breakdown = []
+    for kme in key_model_map.values():
+        reqs = kme["requests"]
+        oks = kme["success_requests"]
+        ptok = kme["prompt_tokens"]
+        catok = kme["cached_tokens"]
+        spd = (kme["gen_comp"] / kme["gen_dur"]) if kme["gen_dur"] > 0 else 0.0
+        key_model_breakdown.append({
+            "key_hash": kme["key_hash"],
+            "key_label": kme["key_label"],
+            "api_key_name": kme["api_key_name"],
+            "api_key_prefix": kme["api_key_prefix"],
+            "api_key_group": kme["api_key_group"],
+            "parent_name": kme["parent_name"],
+            "can_drilldown": kme["can_drilldown"],
+            "model": kme["model"],
+            "requests": reqs,
+            "success_rate": round(oks / reqs * 100, 1) if reqs > 0 else 0.0,
+            "prompt_tokens": ptok,
+            "completion_tokens": kme["completion_tokens"],
+            "total_tokens": kme["total_tokens"],
+            "cached_tokens": catok,
+            "cache_hit_rate": round(min(100.0, catok / ptok * 100), 1) if ptok > 0 else 0.0,
+            "speed_tok_s": round(spd, 1),
+            "recorded_cost_usd": round(kme["recorded_cost_usd"], 4),
+            "cost_usd": round(kme["cost_usd"], 4),
+            "cost_cny": round(kme["cost_usd"] * 7.25, 2),
+        })
+    key_model_breakdown.sort(key=lambda x: (x["total_tokens"], x["requests"]), reverse=True)
+
+    return JSONResponse(content={
+        "summary": summary,
+        "timeseries": timeseries,
+        "model_timeseries": model_timeseries,
+        "key_timeseries": key_timeseries,
+        "top_models": top_models,
+        "top_keys": top_keys,
+        "available_models": available_models,
+        "available_providers": available_providers,
+        "available_keys": available_keys,
+        "recent_requests": recent_list,
+        "recent_total": recent_total,
+        "activity_heatmap": {
+            "days": heatmap_days,
+            "active_days": hm_active_days,
+            "total_requests": hm_total_reqs,
+            "total_tokens": hm_total_tokens,
+            "peak_day_requests": hm_peak_reqs,
+            "peak_day_date": hm_peak_date or "--",
+        },
+        "model_breakdown": final_models,
+        "provider_breakdown": final_providers,
+        "key_breakdown": key_breakdown,
+        "cross_breakdown": cross_breakdown,
+        "key_model_breakdown": key_model_breakdown,
+    })

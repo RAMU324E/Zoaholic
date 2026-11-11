@@ -7,8 +7,9 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timezone
+from typing import Any
 
-from .state import STATE_PATH, load_state
+from .state import STATE_PATH, load_state, save_state
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class OAuthManager:
         }
         return any(field in value for field in credential_fields)
 
-    def _is_legacy_flat_state(self, state: dict) -> bool:
+    def _is_legacy_flat_state(self, state: Any) -> bool:
         """检测 oauth_state.json 是否仍是旧扁平结构。"""
         # 修改原因：空 state 无需迁移；非空 state 要区分旧的 email->cred 和新的 channel->accounts。
         # 修改方式：第一层 value 若不是 dict of dict，或直接带凭据字段，就判定为旧结构。
@@ -149,7 +150,7 @@ class OAuthManager:
                 return True
         return False
 
-    def _normalize_nested_state(self, state: dict) -> dict:
+    def _normalize_nested_state(self, state: Any) -> dict:
         """把已是新结构的 state 清理为可安全访问的嵌套 dict。"""
         # 修改原因：手工编辑或历史异常可能留下非 dict 的渠道值或账号值。
         # 修改方式：只保留 dict 渠道和 dict 凭据，并把渠道名、账号名统一转成字符串 key。
@@ -445,7 +446,7 @@ class OAuthManager:
             return await result
         return result
 
-    def _get_cached_quota(self, cred: dict) -> dict | None:
+    def _get_cached_quota(self, cred: Any) -> dict | None:
         """从 oauth_state 凭据中读取已缓存 quota。"""
         # 修改原因：Codex 普通响应会被动写入 quota，前端按需查询时应优先使用缓存而不是再消耗一次上游请求。
         # 修改方式：只读取顶层 quota_inner、quota_outer 和 quota_raw，并把 quota_raw 映射回接口返回的 raw 字段。
@@ -504,7 +505,7 @@ class OAuthManager:
             return quota
         return None
 
-    def update_quota(self, channel_id: str, key_id: str, quota_data: dict) -> bool:
+    def update_quota(self, channel_id: str, key_id: str, quota_data: Any) -> bool:
         """更新 OAuth 账号的 quota 内存缓存，并安排延迟落盘。"""
         # 修改原因：Codex 响应 wrapper 会在普通请求完成时拿到最新 x-ratelimit-*，这些数据要回写到对应渠道的账号 state。
         # 修改方式：按 channel_id/key_id 定位账号，只更新内存字段，使用 quota_raw 保存原始 header，并安排批量持久化。
@@ -778,30 +779,7 @@ class OAuthManager:
 
     def _write_state_atomic(self) -> None:
         """同步执行 oauth_state.json 原子写。"""
-        # 修改原因：os.replace 只有在同目录临时文件上才能可靠保持原子替换语义。
-        # 修改方式：在状态文件同目录创建 .tmp 文件，写入并 fsync 后再替换正式路径。
-        # 目的：降低机器断电、进程崩溃或写盘异常导致 OAuth 凭据永久损坏的风险。
-        data = json.dumps(self._state, indent=2, ensure_ascii=False)
-        state_path = self._state_path
-        dir_path = os.path.dirname(state_path) or "."
-        os.makedirs(dir_path, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, state_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        try:
-            os.chmod(state_path, 0o600)
-        except OSError:
-            pass
+        save_state(self._state_path, self._state)
 
     def _lock_key(self, channel_id: str | None, key_id: str) -> str:
         """生成渠道级刷新锁 key。"""

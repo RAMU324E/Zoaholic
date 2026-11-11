@@ -4,7 +4,6 @@ import hmac
 import json
 import math
 import os
-import secrets
 import time
 from typing import Any, Dict, Optional
 
@@ -20,7 +19,7 @@ def _b64url_decode(data: str) -> bytes:
 
 
 _CACHED_SECRET: Optional[str] = None
-_FALLBACK_RANDOM_SECRET: str = secrets.token_urlsafe(48)
+LEGACY_JWT_SECRET = "dev-insecure-jwt-secret"
 
 
 def set_jwt_secret(secret: str) -> None:
@@ -28,27 +27,22 @@ def set_jwt_secret(secret: str) -> None:
 
     global _CACHED_SECRET
     secret = (secret or "").strip()
-    if secret:
-        _CACHED_SECRET = secret
+    if not secret or secret == LEGACY_JWT_SECRET:
+        raise ValueError("A trusted JWT signing secret is required")
+    _CACHED_SECRET = secret
 
 
 def _jwt_secret() -> str:
     """获取 JWT 签名密钥。
 
-    优先级：
-    1) 进程内缓存（set_jwt_secret 注入）
-    2) 环境变量 JWT_SECRET（推荐，但不是必须）
-    3) 临时默认值（仅用于未初始化阶段；初始化后会写入 DB 并注入缓存）
+    显式环境变量优先，否则使用启动或初始化时加载的持久化密钥。
+    未就绪时拒绝签发和校验，不提供默认或进程随机密钥。
     """
 
-    if _CACHED_SECRET:
-        return _CACHED_SECRET
-
-    env = (os.getenv("JWT_SECRET") or "").strip()
-    if env:
-        return env
-
-    return _FALLBACK_RANDOM_SECRET
+    secret = (os.getenv("JWT_SECRET") or "").strip() or _CACHED_SECRET
+    if not secret or secret == LEGACY_JWT_SECRET:
+        raise RuntimeError("JWT signing secret is not initialized")
+    return secret
 
 
 def issue_jwt(payload: Dict[str, Any], *, expires_in_seconds: int = 7 * 24 * 3600) -> str:

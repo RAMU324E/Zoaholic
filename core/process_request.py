@@ -60,6 +60,7 @@ async def process_request(
     api_key_info: Optional[Dict[str, Any]] = None,
     key_enabled_plugins: Optional[List[str]] = None,
     dialect_id: Optional[str] = None,
+    stream_header_timeout: Optional[float] = None,
 ) -> Response:
     """
     向单个 provider 发送请求并处理响应
@@ -254,6 +255,7 @@ async def process_request(
                     wrapped_generator, first_response_time = await error_handling_wrapper(
                         generator, channel_id, engine, True,
                         app.state.error_triggers, keepalive_interval=keepalive_interval,
+                        stream_header_timeout=stream_header_timeout,
                         last_message_role=last_message_role,
                         request_url=url,
                         app=app,
@@ -300,6 +302,7 @@ async def process_request(
                     wrapped_generator, first_response_time = await error_handling_wrapper(
                         generator, channel_id, engine, False,
                         app.state.error_triggers, keepalive_interval=keepalive_interval,
+                        stream_header_timeout=stream_header_timeout,
                         last_message_role=last_message_role,
                         request_url=url,
                         app=app,

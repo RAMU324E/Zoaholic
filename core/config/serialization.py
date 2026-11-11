@@ -7,7 +7,7 @@
 # 目的：让业务代码按领域归属维护，同时保留根 utils.py 和 utils_pkg shim 的旧导入兼容性。
 from fastapi.encoders import jsonable_encoder
 
-from .codec import _quote_colon_strings, yaml
+from .codec import quote_colon_strings, yaml
 
 
 def _rebuild_api_with_labels(provider: dict) -> None:
@@ -47,7 +47,7 @@ def _rebuild_api_with_labels(provider: dict) -> None:
         provider["api"] = rebuilt
 
 
-def _sanitize_config_for_persistence(config_data: dict) -> dict:
+def sanitize_config_for_persistence(config_data: dict) -> dict:
     """清理配置中的运行时字段，返回可持久化的 dict。
 
     - 移除 providers/api_keys 中以 "_" 开头的运行时字段
@@ -56,7 +56,7 @@ def _sanitize_config_for_persistence(config_data: dict) -> dict:
 
     import copy
 
-    processed_data = copy.deepcopy(config_data or {})
+    processed_data = copy.deepcopy({k: v for k, v in (config_data or {}).items() if not k.startswith('_')})
 
     # 持久化前还原 label 到 api 列表
     for provider in processed_data.get("providers", []) or []:
@@ -73,12 +73,14 @@ def _sanitize_config_for_persistence(config_data: dict) -> dict:
         for k in keys_to_remove:
             provider.pop(k, None)
 
-    for api_key in processed_data.get("api_keys", []) or []:
-        keys_to_remove = [k for k in list(api_key.keys()) if str(k).startswith("_")]
-        for k in keys_to_remove:
-            api_key.pop(k, None)
+    if "api_keys" in processed_data:
+        from core.key_hierarchy import raw_key_config
+        processed_data["api_keys"] = [raw_key_config(key) for key in processed_data["api_keys"] or []]
 
     return processed_data
+
+
+_sanitize_config_for_persistence = sanitize_config_for_persistence
 
 
 def dump_config_to_json_obj(config_data: dict) -> dict:
@@ -87,7 +89,7 @@ def dump_config_to_json_obj(config_data: dict) -> dict:
     使用 jsonable_encoder 处理 datetime 等类型，避免 JSON 序列化失败。
     """
 
-    processed_data = _sanitize_config_for_persistence(config_data)
+    processed_data = sanitize_config_for_persistence(config_data)
     return jsonable_encoder(processed_data)
 
 
@@ -96,8 +98,8 @@ def dump_config_to_yaml_text(config_data: dict) -> str:
 
     import io
 
-    processed_data = _sanitize_config_for_persistence(config_data)
-    processed_data = _quote_colon_strings(processed_data)
+    processed_data = sanitize_config_for_persistence(config_data)
+    processed_data = quote_colon_strings(processed_data)
 
     buf = io.StringIO()
     yaml.dump(processed_data, buf)

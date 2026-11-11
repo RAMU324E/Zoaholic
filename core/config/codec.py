@@ -24,9 +24,12 @@ class _YamlHelper:
 yaml = _YamlHelper()
 
 
-def _quote_colon_strings(obj):
+def quote_colon_strings(obj):
     """
     递归处理配置数据（历史兼容 no-op）。
     PyYAML CSafeDumper 会自动给含冒号的字符串加引号，无需手动处理。
     """
     return obj
+
+
+_quote_colon_strings = quote_colon_strings

@@ -413,7 +413,7 @@ async def render_gemini_response(
     }
 
 
-async def render_gemini_stream(canonical_sse_chunk: str) -> str:
+async def render_gemini_stream(canonical_sse_chunk: Any) -> Any:
     """
     Canonical SSE -> Gemini SSE
 

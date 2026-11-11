@@ -167,3 +167,6 @@ def is_key_ip_blocked(app: Any, api_index: int | None, client_ip: str | None) ->
     if not isinstance(key_blacklists, list) or api_index < 0 or api_index >= len(key_blacklists):
         return False
     return is_ip_blacklisted(key_blacklists[api_index], client_ip)
+
+
+from core.http_headers import extract_client_ip

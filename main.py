@@ -54,6 +54,7 @@ DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 600))
 # 修改方式：为 keepalive_interval 提供可环境变量覆盖的合理默认值，配置文件仍可按全局/渠道/模型覆盖。
 # 目的：默认每 15 秒向下游发送 SSE 注释帧，避免客户端或中间代理因空闲无字节而断开。
 DEFAULT_KEEPALIVE_INTERVAL = int(os.getenv("KEEPALIVE_INTERVAL", 15))
+DEFAULT_STREAM_HEADER_TIMEOUT = int(os.getenv("STREAM_HEADER_TIMEOUT", 60))
 # DEBUG 环境变量支持 true/false/1/0/yes/no
 is_debug = env_bool("DEBUG", False)
 logger.info("DISABLE_DATABASE: %s", DISABLE_DATABASE)
@@ -67,38 +68,49 @@ except Exception:
     VERSION = 'unknown'
 logger.info("VERSION: %s", VERSION)
 
-def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT):
-    # 存储超时配置
-    # 修改原因：旧逻辑在 preferences 为空或未声明某项偏好时，会让 global 默认值变成空 dict，
-    # 后续调用方若传入兜底值就可能覆盖启动期 default_timeout（keepalive 因此默认落到 99999 并被禁用）。
-    # 修改方式：先写入 default_timeout，再叠加配置文件中的全局/模型级覆盖。
-    # 目的：让 model_timeout、keepalive_interval 等偏好都稳定遵守启动期默认值，同时保留现有覆盖语义。
+def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT, alias_keys=()):
+    # 存储超时配置（支持全局与单渠道覆盖，兼容直接填数值或按模型名的字典，以及别名键如 header_timeout）
     preference_dict = {"default": default_timeout}
     preferences = safe_get(all_config, "preferences", default={})
     providers = safe_get(all_config, "providers", default=[])
-    if preferences:
-        if isinstance(preferences.get(preference_key), int):
-            preference_dict["default"] = preferences.get(preference_key)
-        else:
-            preference_settings = preferences.get(preference_key, {}) or {}
-            for model_name, timeout_value in preference_settings.items():
+    keys_to_check = (preference_key,) + tuple(alias_keys or ())
+    if isinstance(preferences, dict) and preferences:
+        raw_global = None
+        for k in keys_to_check:
+            if preferences.get(k) is not None:
+                raw_global = preferences.get(k)
+                break
+        if isinstance(raw_global, (int, float)) and not isinstance(raw_global, bool):
+            preference_dict["default"] = raw_global
+        elif isinstance(raw_global, dict):
+            for model_name, timeout_value in raw_global.items():
                 preference_dict[model_name] = timeout_value
 
     result = defaultdict(lambda: defaultdict(lambda: default_timeout))
     for provider in providers:
-        provider_preference_settings = safe_get(provider, "preferences", preference_key, default={})
-        if provider_preference_settings:
-            for model_name, timeout_value in provider_preference_settings.items():
-                result[provider['provider']][model_name] = timeout_value
+        if not isinstance(provider, dict) or "provider" not in provider:
+            continue
+        prov_prefs = safe_get(provider, "preferences", default={})
+        if not isinstance(prov_prefs, dict):
+            continue
+        raw_prov = None
+        for k in keys_to_check:
+            if prov_prefs.get(k) is not None:
+                raw_prov = prov_prefs.get(k)
+                break
+        if isinstance(raw_prov, (int, float)) and not isinstance(raw_prov, bool):
+            result[provider["provider"]]["default"] = raw_prov
+        elif isinstance(raw_prov, dict):
+            for model_name, timeout_value in raw_prov.items():
+                result[provider["provider"]][model_name] = timeout_value
 
     result["global"] = preference_dict
-    # print("result", json.dumps(result, indent=4))
-
     return result
 
 # ---- 数据库压缩闸门 ----
-_db_ready = asyncio.Event()
-_db_ready.set()  # 初始状态：放行
+db_ready = asyncio.Event()
+db_ready.set()  # 初始状态：放行
+_db_ready = db_ready
 _last_compact_date = None  # 每天最多压缩一次
 
 
@@ -624,6 +636,8 @@ async def lifespan(app: FastAPI):
     set_handler_debug_mode(is_debug)
     app.state.version = VERSION
     app.state.started_at = datetime.now(timezone.utc)
+    app.state.admin_initialized = False
+    app.state.needs_setup = True
     app.state.startup_completed = False
     
     # 启动定时清理任务
@@ -639,25 +653,6 @@ async def lifespan(app: FastAPI):
             logger.exception("Database init failed during startup: %s", e)
             raise
 
-        # 确保 JWT_SECRET 在进程启动后就已确定（避免后端热更新/重启导致前端旧 JWT 立刻 403）
-        # 规则：若未显式设置环境变量 JWT_SECRET，则使用 DB 中持久化的 admin_user.jwt_secret。
-        try:
-            from core.jwt_utils import set_jwt_secret
-
-            if not (os.getenv("JWT_SECRET") or "").strip():
-                async with async_session_scope() as db:
-                    if (DB_TYPE or "sqlite").lower() == "d1":
-                        row = await db.query_one("SELECT jwt_secret FROM admin_user WHERE id = ?", [1])
-                        jwt_secret = row.get("jwt_secret") if row else None
-                    else:
-                        admin_user = await db.get(AdminUser, 1)
-                        jwt_secret = getattr(admin_user, "jwt_secret", None) if admin_user is not None else None
-
-                if jwt_secret:
-                    set_jwt_secret(str(jwt_secret))
-        except Exception as e:
-            logger.debug("JWT secret init skipped/failed: %s", e)
-
         cleanup_task = asyncio.create_task(cleanup_expired_raw_data())
         logger.info("Started raw data cleanup background task")
         if (DB_TYPE or "sqlite").lower() == "sqlite":
@@ -667,8 +662,6 @@ async def lifespan(app: FastAPI):
     if app and not hasattr(app.state, 'config'):
         # logger.warning("Config not found, attempting to reload")
         app.state.config, app.state.api_keys_db, app.state.api_list = await load_config(app)
-        # 用于前端判断是否需要进入初始化向导
-        app.state.needs_setup = not bool(app.state.api_list)
         # from ruamel.yaml.timestamp import TimeStamp
         # def json_default(obj):
         #     if isinstance(obj, TimeStamp):
@@ -698,11 +691,16 @@ async def lifespan(app: FastAPI):
             app.state.needs_setup = True
             app.state.admin_api_key = []
         else:
-            from core.auth import compute_admin_api_keys
-            app.state.admin_api_key = compute_admin_api_keys(app.state.api_keys_db)
+            from core.auth import list_admin_api_keys
+            app.state.admin_api_key = list_admin_api_keys(app.state.api_keys_db)
+            if not app.state.admin_api_key:
+                logger.warning("No API key with role='admin' configured in api_keys; admin API key list remains empty.")
 
         app.state.provider_timeouts = init_preference(app.state.config, "model_timeout", DEFAULT_TIMEOUT)
         app.state.keepalive_interval = init_preference(app.state.config, "keepalive_interval", DEFAULT_KEEPALIVE_INTERVAL)
+        app.state.stream_header_timeouts = init_preference(
+            app.state.config, "stream_header_timeout", DEFAULT_STREAM_HEADER_TIMEOUT, alias_keys=("header_timeout",)
+        )
         # 初始化 models_list（用于存储从其他 API Key 引用的模型列表）
         app.state.models_list = {}
         # pprint(dict(app.state.provider_timeouts))
@@ -727,6 +725,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start logs retention cleanup task: {e}")
 
+    from core.initialization import refresh_initialization
+    try:
+        await refresh_initialization(app, force=True, repair_secret=True)
+    except Exception:
+        app.state.admin_initialized = False
+        app.state.needs_setup = True
+        logger.exception("Administrator initialization failed; protected APIs remain disabled")
+
     if app and not hasattr(app.state, 'client_manager'):
 
         default_config = {
@@ -737,7 +743,7 @@ async def lifespan(app: FastAPI):
             },
             "http2": False,
             "verify": True,
-            "follow_redirects": True
+            "follow_redirects": False
         }
 
         # 初始化客户端管理器（增加连接池以支持长时间请求）

@@ -7,6 +7,8 @@
 """
 
 import json
+import re
+from typing import Any, List, Optional
 import httpx
 import traceback
 from httpx_socks import AsyncProxyTransport
@@ -41,6 +43,43 @@ def is_local_api_key(name: str) -> bool:
     """
     return name.startswith(LOCAL_API_KEY_PREFIXES)
 
+
+
+_QUERY_SECRET_RE = re.compile(
+    r'((?:[?&]|\b)(?:key|api_key|apikey|token|access_token|client_secret|secret)=)([^&\s"\'\)\]]+)',
+    re.IGNORECASE,
+)
+_BEARER_SECRET_RE = re.compile(r'\b(Bearer\s+)[A-Za-z0-9._\-]{12,}', re.IGNORECASE)
+_KNOWN_KEY_PATTERNS_RE = re.compile(
+    r'\b(?:AIza[0-9A-Za-z_\-]{20,}|AQ\.[0-9A-Za-z_\-.]{16,}|sk-[0-9A-Za-z_\-]{16,}|zk-[0-9A-Za-z_\-]{16,})\b'
+)
+
+
+def scrub_sensitive_error_text(text: Any, extra_secrets: Optional[List[Optional[str]]] = None) -> str:
+    """脱敏异常中的本次上游凭据、URL Query 密钥与 Bearer Token。"""
+    raw = str(text or "")
+    for secret in extra_secrets or ():
+        if isinstance(secret, str) and secret.strip() and secret.strip() != "*":
+            raw = raw.replace(secret.strip(), "***")
+    raw = _QUERY_SECRET_RE.sub(r"\1***", raw)
+    raw = _BEARER_SECRET_RE.sub(r"\1***", raw)
+    return _KNOWN_KEY_PATTERNS_RE.sub("***", raw)
+
+
+def is_valid_model_name(model_name: str, *, check_encoded: bool = False) -> bool:
+    """拒绝穿越、URL 分隔符和控制字符，保留 /、:、@ 等合法模型名字符。"""
+    if not isinstance(model_name, str) or not model_name:
+        return False
+    if (".." in model_name or "\\" in model_name or "?" in model_name or "#" in model_name
+            or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in model_name)):
+        return False
+    if check_encoded:
+        lowered = model_name.lower()
+        if any(encoded in lowered for encoded in ("%2e", "%2f", "%5c", "%25", "%3f", "%23")):
+            return False
+        if re.search(r"%(?:0[0-9a-f]|1[0-9a-f]|7f)", lowered):
+            return False
+    return True
 
 
 def get_model_dict(provider):
@@ -462,3 +501,12 @@ def truncate_for_logging(
         serialized = serialized[:max_total_size] + f"... [截断总计 {len(serialized) - max_total_size} 字符]"
 
     return serialized
+
+
+save_all_auto_disabled = _save_all_auto_disabled
+
+
+convert_webp_base64_to_png = _convert_webp_base64_to_png
+
+
+prepare_image_for_upload = _prepare_image_for_upload

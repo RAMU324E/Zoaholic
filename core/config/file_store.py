@@ -9,8 +9,8 @@ import os
 
 from core.log_config import logger
 
-from .codec import _quote_colon_strings, yaml
-from .serialization import _sanitize_config_for_persistence
+from .codec import quote_colon_strings, yaml
+from .serialization import sanitize_config_for_persistence
 
 
 # 修改原因：实现文件迁移到 core/config 后，__file__ 会指向包目录，默认 api.yaml 路径会错误地落到 core/api.yaml。
@@ -36,8 +36,8 @@ def save_api_yaml(config_data):
     # 修改原因：配置持久化清理逻辑已经拆到 config_persistence，文件写入模块不应复制一份清理规则。
     # 修改方式：统一调用 _sanitize_config_for_persistence，再保留本函数原有的安全检查和原子写入。
     # 目的：让 JSON、YAML 导出和 api.yaml 写入使用同一套运行时字段过滤规则。
-    processed_data = _sanitize_config_for_persistence(config_data)
-    processed_data = _quote_colon_strings(processed_data)
+    processed_data = sanitize_config_for_persistence(config_data)
+    processed_data = quote_colon_strings(processed_data)
 
     target_path = os.path.abspath(API_YAML_PATH)
 
@@ -116,8 +116,7 @@ def save_api_yaml(config_data):
             temp_path = None
             return
         except OSError as e:
-            replace_errno = getattr(e, "errno", None)
-            if replace_errno not in {errno.EBUSY, errno.EXDEV, errno.EPERM, errno.EACCES}:
+            if e.errno not in {errno.EBUSY, errno.EXDEV, errno.EPERM, errno.EACCES}:
                 raise
 
             logger.warning(

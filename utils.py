@@ -40,7 +40,7 @@ from core.utils import (
     parse_json_safely,
 )
 from core.json_utils import json_dumps_text, json_loads
-from core.config.codec import _YamlHelper, _quote_colon_strings, yaml
+from core.config.codec import _YamlHelper, _quote_colon_strings, quote_colon_strings, yaml
 from core.config import file_store as _config_file
 from core.config import loader as _config_loader
 from core.config.service import (
@@ -89,6 +89,7 @@ async def load_config(*args, **kwargs):
 from core.config.serialization import (
     _rebuild_api_with_labels,
     _sanitize_config_for_persistence,
+    sanitize_config_for_persistence,
     dump_config_to_json_obj,
     dump_config_to_yaml_text,
 )
