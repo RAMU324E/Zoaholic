@@ -294,22 +294,22 @@ export default function Layout() {
       </aside>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 border-b border-border flex items-center px-4 md:px-8 bg-background/80 flex-shrink-0 backdrop-blur-sm">
+      <div className="flex-1 flex flex-col min-w-0 max-w-full overflow-x-hidden">
+        <header className="h-14 md:h-16 border-b border-border flex items-center px-3 sm:px-4 md:px-8 bg-background/80 flex-shrink-0 backdrop-blur-sm">
           {/* Mobile Menu Button */}
           <button
             onClick={() => setMobileMenuOpen(true)}
-            className="p-2 rounded-lg hover:bg-muted transition-colors md:hidden mr-2"
+            className="p-2 rounded-lg hover:bg-muted transition-colors md:hidden mr-1.5"
           >
             <Menu className="w-5 h-5" />
           </button>
 
-          <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+          <h2 className="text-base md:text-lg font-semibold text-foreground flex items-center gap-2 truncate">
             {currentLabel}
           </h2>
         </header>
-        <main id="app-main-scroll" className="flex-1 overflow-auto p-4 md:p-8 bg-muted/20">
-          <div className="max-w-7xl mx-auto min-h-full">
+        <main id="app-main-scroll" className="flex-1 overflow-y-auto overflow-x-hidden p-2.5 sm:p-4 md:p-8 bg-muted/20">
+          <div className="max-w-7xl mx-auto min-h-full min-w-0 w-full">
             <Outlet />
           </div>
         </main>

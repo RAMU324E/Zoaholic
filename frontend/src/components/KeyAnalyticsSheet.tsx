@@ -576,7 +576,7 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyHash,
                   </h4>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
+                  <table className="w-full min-w-[460px] text-left text-sm whitespace-nowrap">
                     <thead className="bg-muted text-muted-foreground text-xs">
                       <tr>
                         <th className="px-4 py-2.5">IP</th>
@@ -765,7 +765,7 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyHash,
                   </h4>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
+                  <table className="w-full min-w-[420px] text-left text-sm whitespace-nowrap">
                     <thead className="bg-muted text-muted-foreground text-xs">
                       <tr>
                         <th className="px-4 py-2.5">模型</th>
@@ -809,7 +809,7 @@ export function KeyAnalyticsSheet({ open, onOpenChange, apiKeyValue, apiKeyHash,
                 </button>
                 {errorsExpanded && (
                   <div className="border-t border-border overflow-x-auto">
-                    <table className="w-full text-left text-sm">
+                    <table className="w-full min-w-[440px] text-left text-sm whitespace-nowrap">
                       <thead className="bg-muted text-muted-foreground text-xs">
                         <tr>
                           <th className="px-4 py-2.5">时间</th>

@@ -865,6 +865,15 @@ class ModelRequestHandler:
                 break
             # 即使候选全被跳过，也让取消请求和其他任务有机会执行。
             await asyncio.sleep(0)
+            if current_retry_count > 0 and raw_request is not None:
+                try:
+                    if await raw_request.is_disconnected():
+                        logger.info(f"Client disconnected before retry #{current_retry_count} for {request_model_name}, aborting retry loop")
+                        raise asyncio.CancelledError()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
             attempts += 1
             current_index = index % num_matching_providers
             index += 1

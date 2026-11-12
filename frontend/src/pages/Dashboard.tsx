@@ -829,18 +829,18 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-5 animate-in fade-in duration-300 font-sans pb-14">
+    <div className="space-y-4 sm:space-y-5 animate-in fade-in duration-300 font-sans pb-14 min-w-0 w-full max-w-full overflow-x-clip">
       {/* =====================================================================
           1. 常驻吸顶全局指挥栏（Sticky Command Bar）
              - 随页面滚动常驻顶部，使「模块跳转」「时间/模型切换」「回到顶部」真正随时可用
              - 集成全局模型与渠道过滤，一键驱动全页所有卡片（尤其是缓存命中率）与图表
          ===================================================================== */}
-      <div className="sticky -top-4 md:-top-8 z-30 -mx-2 px-2 pt-2 pb-2 bg-background/85 backdrop-blur-md border-b border-border/70 shadow-sm transition-all">
-        <div className="bg-card/95 border border-border/80 rounded-2xl px-3.5 py-2.5 shadow-sm space-y-2">
+      <div className="sticky -top-2.5 sm:-top-4 md:-top-8 z-30 pt-1.5 pb-1.5 bg-background/90 backdrop-blur-md border-b border-border/70 shadow-sm transition-all min-w-0">
+        <div className="bg-card/95 border border-border/80 rounded-2xl px-2.5 sm:px-3.5 py-2 sm:py-2.5 shadow-sm space-y-2 min-w-0">
           {/* 第一行：锚点跳转 + 时间粒度 + 刷新 & 回到顶部 */}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* 模块快捷跳转胶囊（带 ScrollSpy 自动高亮） */}
-            <div className="flex items-center gap-1 flex-wrap">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2 min-w-0">
+            {/* 模块快捷跳转胶囊（移动端单行横向滑动，桌面端自动换行） */}
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap pb-0.5 sm:pb-0">
               {NAV_SECTIONS.map(nav => {
                 const isActive = activeAnchor === nav.id;
                 return (
@@ -848,7 +848,7 @@ export default function Dashboard() {
                     key={nav.id}
                     type="button"
                     onClick={() => scrollToSection(nav.id)}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all ${
+                    className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all whitespace-nowrap shrink-0 ${
                       isActive
                         ? 'bg-primary/15 text-primary border border-primary/40 font-semibold'
                         : 'text-muted-foreground hover:text-foreground hover:bg-muted/60 border border-transparent'
@@ -861,8 +861,8 @@ export default function Dashboard() {
             </div>
 
             {/* 时间范围 + 操作按钮 */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <div className="inline-flex items-center bg-muted/40 border border-border/80 rounded-xl p-0.5 gap-0.5 overflow-x-auto">
+            <div className="flex items-center justify-between sm:justify-end gap-1.5 min-w-0">
+              <div className="inline-flex items-center bg-muted/40 border border-border/80 rounded-xl p-0.5 gap-0.5 overflow-x-auto no-scrollbar min-w-0 flex-1 sm:flex-initial">
                 {RANGE_OPTIONS.map(opt => {
                   const active = rangeKey === opt.key && !customStart && !customEnd;
                   return (
@@ -874,7 +874,7 @@ export default function Dashboard() {
                         setCustomEnd('');
                         setRangeKey(opt.key);
                       }}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-all whitespace-nowrap ${
+                      className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg transition-all whitespace-nowrap shrink-0 ${
                         active
                           ? 'bg-primary text-primary-foreground shadow-sm'
                           : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
@@ -887,7 +887,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setShowCustomTime(v => !v)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-all inline-flex items-center gap-1 ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0 ${
                     customStart || customEnd || showCustomTime
                       ? 'bg-primary/15 text-primary border border-primary/30'
                       : 'text-muted-foreground hover:text-foreground'
@@ -899,41 +899,44 @@ export default function Dashboard() {
                 </button>
               </div>
 
-              <button
-                type="button"
-                onClick={fetchDashboard}
-                title="刷新实时数据"
-                className="p-1.5 text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/80 border border-border/80 rounded-xl transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-primary' : ''}`} />
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={fetchDashboard}
+                  title="刷新实时数据"
+                  className="p-1.5 text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/80 border border-border/80 rounded-xl transition-colors"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-primary' : ''}`} />
+                </button>
 
-              <button
-                type="button"
-                onClick={scrollToTop}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-xl border transition-all ${
-                  isScrolled
-                    ? 'bg-primary text-primary-foreground border-primary shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground bg-muted/40 border-border/80'
-                }`}
-              >
-                <ArrowUp className="w-3.5 h-3.5" />
-                回到顶部
-              </button>
+                <button
+                  type="button"
+                  onClick={scrollToTop}
+                  title="回到顶部"
+                  className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-xl border transition-all whitespace-nowrap ${
+                    isScrolled
+                      ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground bg-muted/40 border-border/80'
+                  }`}
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">回到顶部</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* 第二行：全局「模型」快捷胶囊筛选（每个模型直接展示自己的缓存命中率！） + 「渠道」筛选 */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-border/50">
-            <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
+          {/* 第二行：全局「模型」快捷胶囊筛选（移动端单行横向滑动不遮挡屏幕） + 「Key/渠道」筛选 */}
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-1.5 sm:gap-2 pt-1.5 border-t border-border/50 min-w-0">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap sm:flex-1 min-w-0 pb-0.5 sm:pb-0">
               <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground shrink-0 mr-0.5">
                 <Filter className="w-3 h-3 text-primary" />
-                模型视图:
+                模型:
               </span>
               <button
                 type="button"
                 onClick={() => setSelectedModels([])}
-                className={`px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-all ${
+                className={`px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-all whitespace-nowrap shrink-0 ${
                   selectedModels.length === 0
                     ? 'bg-foreground text-background border-foreground font-semibold'
                     : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
@@ -950,15 +953,15 @@ export default function Dashboard() {
                     type="button"
                     onClick={() => toggleModelFilter(item.model)}
                     title={`点击只看 ${item.model}（请求 ${item.requests} 次 · 缓存命中率 ${item.cache_hit_rate}% · 速度 ${item.speed_tok_s} tok/s）`}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-lg border transition-all tabular-nums ${
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-lg border transition-all tabular-nums whitespace-nowrap shrink-0 ${
                       isSelected
                         ? 'bg-primary text-primary-foreground border-primary font-semibold shadow-sm'
                         : 'bg-muted/30 text-foreground/85 border-border/70 hover:bg-muted/70'
                     }`}
                   >
-                    <span className="truncate max-w-[150px]">{item.model}</span>
+                    <span className="truncate max-w-[135px] sm:max-w-[150px]">{item.model}</span>
                     <span
-                      className={`text-[10px] px-1 rounded ${
+                      className={`text-[10px] px-1 rounded shrink-0 ${
                         isSelected
                           ? 'bg-primary-foreground/20 text-primary-foreground'
                           : item.cache_hit_rate >= 50
@@ -974,11 +977,11 @@ export default function Dashboard() {
             </div>
 
             {/* 右侧：Key 筛选开关 + 渠道筛选开关 + 一键重置过滤 */}
-            <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full shrink-0 sm:flex-wrap">
               <button
                 type="button"
                 onClick={() => setShowKeyDrawer(v => !v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
                   selectedKeys.length > 0 || showKeyDrawer
                     ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
                     : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
@@ -993,7 +996,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => setShowProviderDrawer(v => !v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors ${
+                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
                   selectedProviders.length > 0 || showProviderDrawer
                     ? 'bg-primary/15 text-primary border-primary/40'
                     : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
@@ -1009,7 +1012,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={clearAllFilters}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 rounded-lg transition-colors"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <X className="w-3 h-3" />
                   清除筛选
@@ -1020,7 +1023,7 @@ export default function Dashboard() {
 
           {/* 展开的 API Key 多选抽屉 */}
           {showKeyDrawer && (
-            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5">
+            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
               <span className="text-[11px] text-muted-foreground mr-1">选择 API Key:</span>
               <button
                 type="button"
@@ -1047,18 +1050,18 @@ export default function Dashboard() {
                         : 'bg-muted/30 text-muted-foreground border-border/70 hover:text-foreground'
                     }`}
                   >
-                    <KeyRound className="w-2.5 h-2.5 opacity-80" />
-                    <span className="truncate max-w-[140px]">{k.key_label}</span>
+                    <KeyRound className="w-2.5 h-2.5 opacity-80 shrink-0" />
+                    <span className="truncate max-w-[120px] sm:max-w-[140px]">{k.key_label}</span>
                     {k.api_key_group && (
                       <span
-                        className={`text-[9px] px-1 rounded ${
+                        className={`text-[9px] px-1 rounded shrink-0 ${
                           active ? 'bg-slate-950/20 text-slate-950' : 'bg-muted text-muted-foreground'
                         }`}
                       >
                         {k.api_key_group}
                       </span>
                     )}
-                    <span className="opacity-75 text-[10px]">({formatTokens(k.total_tokens)})</span>
+                    <span className="opacity-75 text-[10px] shrink-0">({formatTokens(k.total_tokens)})</span>
                   </button>
                 );
               })}
@@ -1067,7 +1070,7 @@ export default function Dashboard() {
 
           {/* 展开的渠道多选抽屉 */}
           {showProviderDrawer && (
-            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5">
+            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
               <span className="text-[11px] text-muted-foreground mr-1">选择渠道:</span>
               <button
                 type="button"
@@ -1103,20 +1106,20 @@ export default function Dashboard() {
 
           {/* 展开的自定义起止时间栏 */}
           {showCustomTime && (
-            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-2 text-xs">
+            <div className="pt-2 border-t border-border/50 flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 text-xs">
               <span className="text-muted-foreground">起止时间:</span>
               <input
                 type="datetime-local"
                 value={customStart}
                 onChange={e => setCustomStart(e.target.value)}
-                className="px-2.5 py-1 text-xs bg-background border border-border rounded-lg text-foreground"
+                className="px-2.5 py-1 text-xs bg-background border border-border rounded-lg text-foreground w-full sm:w-auto"
               />
-              <span className="text-muted-foreground">→</span>
+              <span className="text-muted-foreground hidden sm:inline">→</span>
               <input
                 type="datetime-local"
                 value={customEnd}
                 onChange={e => setCustomEnd(e.target.value)}
-                className="px-2.5 py-1 text-xs bg-background border border-border rounded-lg text-foreground"
+                className="px-2.5 py-1 text-xs bg-background border border-border rounded-lg text-foreground w-full sm:w-auto"
               />
               {(customStart || customEnd) && (
                 <button
@@ -1125,7 +1128,7 @@ export default function Dashboard() {
                     setCustomStart('');
                     setCustomEnd('');
                   }}
-                  className="text-xs text-rose-400 hover:underline"
+                  className="text-xs text-rose-400 hover:underline self-start sm:self-auto"
                 >
                   清除时间
                 </button>
@@ -1138,39 +1141,39 @@ export default function Dashboard() {
       {/* =====================================================================
           2. 核心 6 指标卡片矩阵 + 主时序图 & 实时活动流
          ===================================================================== */}
-      <div id="section-overview" className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3.5">
+      <div id="section-overview" className="space-y-4 min-w-0">
+        <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2.5 sm:gap-3.5 min-w-0">
           {/* Card 1: TOKEN 消耗 */}
-          <div className="relative bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
+          <div className="relative bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
             <div className="absolute left-0 top-3 bottom-3 w-1 rounded-r-full bg-gradient-to-b from-indigo-500 via-purple-500 to-amber-500" />
-            <div>
-              <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
+            <div className="min-w-0">
+              <div className="flex items-center justify-between gap-1 text-[11px] sm:text-xs font-medium text-muted-foreground">
+                <span className="inline-flex items-center gap-1 sm:gap-1.5 truncate">
                   <span className="text-indigo-400">◆</span>
-                  <span>TOKEN 消耗</span>
+                  <span className="truncate">TOKEN 消耗</span>
                 </span>
                 {selectedModels.length === 1 && (
-                  <span className="text-[10px] text-primary truncate max-w-[90px]" title={selectedModels[0]}>
+                  <span className="text-[10px] text-primary truncate max-w-[65px] sm:max-w-[90px]" title={selectedModels[0]}>
                     {selectedModels[0]}
                   </span>
                 )}
               </div>
-              <div className="mt-2 text-3xl font-bold tracking-tight tabular-nums text-foreground">
+              <div className="mt-1.5 sm:mt-2 text-2xl sm:text-3xl font-bold tracking-tight tabular-nums text-foreground truncate">
                 {formatTokens(summary?.total_tokens || 0)}
               </div>
-              <div className="mt-2 space-y-1 text-[11px] text-muted-foreground tabular-nums">
-                <div>
-                  输入 <span className="font-semibold text-foreground/90">{formatTokens(summary?.prompt_tokens || 0)}</span>
-                  {' · '}
-                  输出 <span className="font-semibold text-foreground/90">{formatTokens(summary?.completion_tokens || 0)}</span>
+              <div className="mt-1.5 sm:mt-2 space-y-0.5 sm:space-y-1 text-[10px] sm:text-[11px] text-muted-foreground tabular-nums leading-snug">
+                <div className="flex flex-wrap items-center gap-x-1">
+                  <span>输入 <strong className="font-semibold text-foreground/90">{formatTokens(summary?.prompt_tokens || 0)}</strong></span>
+                  <span>·</span>
+                  <span>输出 <strong className="font-semibold text-foreground/90">{formatTokens(summary?.completion_tokens || 0)}</strong></span>
                 </div>
-                <div>
-                  未命中 <span className="font-semibold text-foreground/90">{formatTokens(summary?.uncached_tokens || 0)}</span>
-                  {' · '}
-                  缓存 <span className="font-semibold text-foreground/90">{formatTokens(summary?.cached_tokens || 0)}</span>
+                <div className="flex flex-wrap items-center gap-x-1">
+                  <span>未命中 <strong className="font-semibold text-foreground/90">{formatTokens(summary?.uncached_tokens || 0)}</strong></span>
+                  <span>·</span>
+                  <span>缓存 <strong className="font-semibold text-foreground/90">{formatTokens(summary?.cached_tokens || 0)}</strong></span>
                 </div>
               </div>
-              <div className="mt-2.5 flex items-center gap-1">
+              <div className="mt-2 sm:mt-2.5 flex items-center gap-1">
                 <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden flex">
                   <div
                     className="h-full bg-slate-300 dark:bg-slate-200 transition-all duration-500"
@@ -1192,90 +1195,90 @@ export default function Dashboard() {
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
               </div>
             </div>
-            <div className="mt-2.5 pt-1">
+            <div className="mt-2 sm:mt-2.5 pt-1">
               <MiniSparkline values={tokenSeries} strokeColor="#e07a5f" gradientId="spark-token" />
             </div>
           </div>
 
           {/* Card 2: 请求数 */}
-          <div className="bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
-            <div>
-              <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
+          <div className="bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] sm:text-xs font-medium text-muted-foreground">
+                <span className="inline-flex items-center gap-1 sm:gap-1.5 shrink-0">
                   <span className="text-sky-400">⇄</span>
                   <span>请求数</span>
                 </span>
-                <div className="inline-flex items-center gap-1">
+                <div className="inline-flex items-center gap-1 flex-wrap">
                   <button
                     type="button"
                     onClick={() => scrollToSection('section-key-usage')}
                     title="点击跳转到 Key 用量排行"
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 text-[10px] transition-colors"
+                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 text-[10px] transition-colors whitespace-nowrap"
                   >
                     Key {summary?.active_keys ?? keyBreakdown.length}
                   </button>
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-purple-500/10 text-purple-400 text-[10px]">
+                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-purple-500/10 text-purple-400 text-[10px] whitespace-nowrap">
                     渠道 {providerBreakdown.length}
                   </span>
                 </div>
               </div>
-              <div className="mt-2 flex items-baseline gap-1">
-                <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">
+              <div className="mt-1.5 sm:mt-2 flex items-baseline gap-1 min-w-0">
+                <span className="text-2xl sm:text-3xl font-bold tracking-tight tabular-nums text-foreground truncate">
                   {(summary?.total_requests || 0).toLocaleString()}
                 </span>
-                <span className="text-xs text-muted-foreground">次</span>
+                <span className="text-xs text-muted-foreground shrink-0">次</span>
               </div>
-              <div className="mt-2 text-[11px] text-muted-foreground tabular-nums">
-                失败 <span className="font-semibold text-foreground/90">{(summary?.failed_requests || 0).toLocaleString()}</span>
-                {' · '}
-                成功率 <span className="font-semibold text-foreground/90">{(summary?.success_rate || 0).toFixed(1)}%</span>
+              <div className="mt-1.5 sm:mt-2 text-[10px] sm:text-[11px] text-muted-foreground tabular-nums leading-snug flex flex-wrap items-center gap-x-1">
+                <span>失败 <strong className="font-semibold text-foreground/90">{(summary?.failed_requests || 0).toLocaleString()}</strong></span>
+                <span>·</span>
+                <span>成功率 <strong className="font-semibold text-foreground/90">{(summary?.success_rate || 0).toFixed(1)}%</strong></span>
               </div>
             </div>
-            <div className="mt-2.5 pt-1">
+            <div className="mt-2 sm:mt-2.5 pt-1">
               <MiniSparkline values={reqSeries} strokeColor="#6488ea" gradientId="spark-req" />
             </div>
           </div>
 
           {/* Card 3: 生成速度 */}
-          <div className="bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
-            <div>
-              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <div className="bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-medium text-muted-foreground">
                 <span className="text-amber-400">⚡</span>
-                <span>生成速度</span>
+                <span className="truncate">生成速度</span>
               </div>
-              <div className="mt-2 flex items-baseline gap-1">
-                <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">
+              <div className="mt-1.5 sm:mt-2 flex items-baseline gap-1 min-w-0">
+                <span className="text-2xl sm:text-3xl font-bold tracking-tight tabular-nums text-foreground truncate">
                   {(summary?.avg_speed_tok_s || 0).toFixed(1)}
                 </span>
-                <span className="text-xs text-muted-foreground">tok/s</span>
+                <span className="text-xs text-muted-foreground shrink-0">tok/s</span>
               </div>
-              <div className="mt-2 space-y-1 text-[11px] text-muted-foreground tabular-nums">
-                <div>
-                  平均耗时 <span className="font-semibold text-foreground/90">{(summary?.avg_process_time || 0).toFixed(2)} s</span>
-                  {' · '}
-                  首字 <span className="font-semibold text-foreground/90">{(summary?.avg_first_response_time || 0).toFixed(2)} s</span>
+              <div className="mt-1.5 sm:mt-2 space-y-0.5 sm:space-y-1 text-[10px] sm:text-[11px] text-muted-foreground tabular-nums leading-snug">
+                <div className="flex flex-wrap items-center gap-x-1">
+                  <span>耗时 <strong className="font-semibold text-foreground/90">{(summary?.avg_process_time || 0).toFixed(2)}s</strong></span>
+                  <span>·</span>
+                  <span>首字 <strong className="font-semibold text-foreground/90">{(summary?.avg_first_response_time || 0).toFixed(2)}s</strong></span>
                 </div>
-                <div>
-                  峰值吞吐 <span className="font-semibold text-foreground/90">{Math.round(summary?.peak_speed_tok_s || 0)} tok/s</span>
-                  {' · '}
-                  p90 首字 <span className="font-semibold text-foreground/90">{(summary?.p90_first_response_time || 0).toFixed(2)} s</span>
+                <div className="flex flex-wrap items-center gap-x-1">
+                  <span>峰值 <strong className="font-semibold text-foreground/90">{Math.round(summary?.peak_speed_tok_s || 0)}</strong></span>
+                  <span>·</span>
+                  <span>p90 <strong className="font-semibold text-foreground/90">{(summary?.p90_first_response_time || 0).toFixed(2)}s</strong></span>
                 </div>
               </div>
             </div>
-            <div className="mt-2.5 pt-1">
+            <div className="mt-2 sm:mt-2.5 pt-1">
               <MiniSparkline values={speedSeries} strokeColor="#e07a5f" gradientId="spark-speed" />
             </div>
           </div>
 
           {/* Card 4: 缓存命中率（支持单模型精准展示 & 多模型独立命中率迷你排行） */}
-          <div className="bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
-            <div>
-              <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
+          <div className="bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] sm:text-xs font-medium text-muted-foreground">
+                <span className="inline-flex items-center gap-1 sm:gap-1.5 shrink-0">
                   <span className="text-cyan-400">♻</span>
                   <span>缓存命中率</span>
                 </span>
-                <span className="text-[10px] text-cyan-400 font-medium">
+                <span className="text-[10px] text-cyan-400 font-medium hidden sm:inline">
                   {selectedModels.length === 1
                     ? '单模型精确'
                     : selectedModels.length > 1
@@ -1283,26 +1286,26 @@ export default function Dashboard() {
                     : '点击模型可单看'}
                 </span>
               </div>
-              <div className="mt-2 text-3xl font-bold tracking-tight tabular-nums text-foreground">
+              <div className="mt-1.5 sm:mt-2 text-2xl sm:text-3xl font-bold tracking-tight tabular-nums text-foreground truncate">
                 {(summary?.cache_hit_rate || 0).toFixed(1)}%
               </div>
-              <div className="mt-1.5 text-[11px] text-muted-foreground tabular-nums">
+              <div className="mt-1 sm:mt-1.5 text-[10px] sm:text-[11px] text-muted-foreground tabular-nums leading-snug">
                 缓存复用 <span className="font-semibold text-foreground/90">{formatTokens(summary?.cached_tokens || 0)}</span> tok
               </div>
 
               {/* 当处于「全部模型」时，直接列出 Top 模型的各自独立缓存命中率，点击任意一行立刻只看该模型 */}
               {selectedModels.length === 0 && modelBreakdown.length > 0 && (
-                <div className="mt-2 space-y-1 border-t border-border/50 pt-1.5">
+                <div className="mt-1.5 sm:mt-2 space-y-1 border-t border-border/50 pt-1.5">
                   {modelBreakdown.slice(0, 2).map(m => (
                     <button
                       key={m.model}
                       type="button"
                       onClick={() => m.model && toggleModelFilter(m.model)}
-                      className="w-full flex items-center justify-between text-[10px] text-muted-foreground hover:text-foreground transition-colors tabular-nums"
+                      className="w-full flex items-center justify-between gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors tabular-nums min-w-0"
                       title={`点击只看 ${m.model} 的缓存与速度`}
                     >
-                      <span className="truncate max-w-[115px]">{m.model}</span>
-                      <span className="font-semibold text-cyan-400">{m.cache_hit_rate.toFixed(1)}%</span>
+                      <span className="truncate flex-1 text-left">{m.model}</span>
+                      <span className="font-semibold text-cyan-400 shrink-0">{m.cache_hit_rate.toFixed(1)}%</span>
                     </button>
                   ))}
                 </div>
@@ -1314,20 +1317,20 @@ export default function Dashboard() {
           </div>
 
           {/* Card 5: API 等价 / 费用 */}
-          <div className="bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
-            <div>
-              <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <div className="bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-medium text-muted-foreground">
                 <span className="text-rose-400">¥</span>
-                <span>API 等价 / 费用</span>
+                <span className="truncate">API 等价 / 费用</span>
               </div>
-              <div className="mt-2 text-3xl font-bold tracking-tight tabular-nums text-rose-400">
+              <div className="mt-1.5 sm:mt-2 text-2xl sm:text-3xl font-bold tracking-tight tabular-nums text-rose-400 truncate">
                 ¥ {(summary?.total_cost_cny || 0).toFixed(2)}
               </div>
-              <div className="mt-2 space-y-1 text-[11px] text-muted-foreground tabular-nums">
-                <div>
-                  折合 <span className="text-emerald-400 font-semibold">${(summary?.total_cost_usd || 0).toFixed(2)}</span>
-                  {' · '}
-                  实记 <span className="font-semibold text-foreground/90">${(summary?.recorded_cost_usd || 0).toFixed(2)}</span>
+              <div className="mt-1.5 sm:mt-2 space-y-0.5 sm:space-y-1 text-[10px] sm:text-[11px] text-muted-foreground tabular-nums leading-snug">
+                <div className="flex flex-wrap items-center gap-x-1">
+                  <span>折合 <strong className="text-emerald-400 font-semibold">${(summary?.total_cost_usd || 0).toFixed(2)}</strong></span>
+                  <span>·</span>
+                  <span>实记 <strong className="font-semibold text-foreground/90">${(summary?.recorded_cost_usd || 0).toFixed(2)}</strong></span>
                 </div>
                 <div>
                   单次均价 ¥
@@ -1337,22 +1340,22 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
-            <div className="mt-2.5 pt-1">
+            <div className="mt-2 sm:mt-2.5 pt-1">
               <MiniSparkline values={costSeries} strokeColor="#e07a5f" gradientId="spark-cost" />
             </div>
           </div>
 
           {/* Card 6: 请求成功率 */}
-          <div className="bg-card border border-border/80 rounded-2xl p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[212px]">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <div className="bg-card border border-border/80 rounded-2xl p-3 sm:p-4 shadow-sm overflow-hidden flex flex-col justify-between min-h-[172px] sm:min-h-[212px] min-w-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:text-xs font-medium text-muted-foreground">
               <span className="text-emerald-400">✓</span>
-              <span>请求成功率</span>
+              <span className="truncate">请求成功率</span>
             </div>
             <SuccessDonutGauge
               rate={summary?.success_rate || 0}
               total={summary?.total_requests || 0}
             />
-            <div className="text-center text-[11px] text-muted-foreground tabular-nums">
+            <div className="text-center text-[10px] sm:text-[11px] text-muted-foreground tabular-nums truncate">
               {(summary?.total_requests || 0).toLocaleString()} 次 · 失败{' '}
               <span className="font-semibold text-foreground/90">{(summary?.failed_requests || 0).toLocaleString()}</span> 次
             </div>
@@ -1360,19 +1363,19 @@ export default function Dashboard() {
         </div>
 
         {/* 中部双栏：五合一主时序面板 + 最近请求实时活动流 */}
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 min-w-0">
           {/* 左栏：统一多模式时序分析面板（消除原版上下两套重复图表） */}
           <div
             className={`${
               dualChartCompare ? 'xl:col-span-12' : 'xl:col-span-7'
-            } bg-card border border-border/80 rounded-2xl p-5 shadow-sm flex flex-col justify-between`}
+            } bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm flex flex-col justify-between min-w-0 overflow-hidden`}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-              <div className="flex items-baseline gap-2.5 flex-wrap">
+            <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2 mb-3 sm:mb-4 min-w-0">
+              <div className="flex items-baseline gap-2 flex-wrap min-w-0">
                 <h3 className="text-sm font-bold tracking-wide text-foreground uppercase">
                   TOKEN 与请求时序
                 </h3>
-                <span className="text-xs text-muted-foreground tabular-nums">
+                <span className="text-[11px] sm:text-xs text-muted-foreground tabular-nums">
                   {formatRangeWindow(summary?.start_datetime, summary?.end_datetime)}
                   {' · '}
                   {summary?.granularity === 'day' ? '日粒度' : '小时粒度'}
@@ -1381,8 +1384,8 @@ export default function Dashboard() {
                 </span>
               </div>
 
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <div className="inline-flex items-center bg-muted/50 border border-border/80 rounded-lg p-0.5 gap-0.5 flex-wrap">
+              <div className="flex items-center gap-1.5 min-w-0 max-w-full">
+                <div className="inline-flex items-center bg-muted/50 border border-border/80 rounded-lg p-0.5 gap-0.5 overflow-x-auto no-scrollbar max-w-full flex-nowrap sm:flex-wrap min-w-0 flex-1 sm:flex-initial">
                   {[
                     { key: 'token', label: 'Token+请求' },
                     { key: 'cache', label: '缓存堆叠' },
@@ -1397,7 +1400,7 @@ export default function Dashboard() {
                       onClick={() =>
                         setChartMode(tab.key as 'token' | 'cache' | 'models' | 'keys' | 'requests' | 'throughput')
                       }
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all ${
+                      className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-md transition-all whitespace-nowrap shrink-0 ${
                         chartMode === tab.key
                           ? 'bg-card text-foreground shadow-sm border border-border/60 font-semibold'
                           : 'text-muted-foreground hover:text-foreground'
@@ -1412,22 +1415,22 @@ export default function Dashboard() {
                   type="button"
                   onClick={() => setDualChartCompare(v => !v)}
                   title="切换单图 / 双图并排对比（同时查看分模型折线与缓存堆叠柱状图）"
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                  className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
                     dualChartCompare
                       ? 'bg-primary/15 text-primary border-primary/40'
                       : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
                   }`}
                 >
                   <Layers className="w-3.5 h-3.5" />
-                  双图并排
+                  <span className="hidden sm:inline">双图并排</span>
                 </button>
               </div>
             </div>
 
             {dualChartCompare ? (
-              /* 双图并排模式：左为分模型请求趋势折线图，右为输入命中缓存/未命中/输出堆叠柱状图 */
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 h-[280px]">
-                <div className="bg-muted/20 border border-border/60 rounded-xl p-3 flex flex-col">
+              /* 双图并排模式：移动端上下自适应高度堆叠，桌面端左右并排 */
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 h-auto lg:h-[280px] min-w-0">
+                <div className="bg-muted/20 border border-border/60 rounded-xl p-3 flex flex-col h-[230px] lg:h-full min-w-0">
                   <div className="text-xs font-semibold text-foreground mb-2">
                     分模型请求次数趋势
                   </div>
@@ -1456,7 +1459,7 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div className="bg-muted/20 border border-border/60 rounded-xl p-3 flex flex-col">
+                <div className="bg-muted/20 border border-border/60 rounded-xl p-3 flex flex-col h-[230px] lg:h-full min-w-0">
                   <div className="text-xs font-semibold text-foreground mb-2">
                     Token 缓存命中 / 未命中 / 输出堆叠
                   </div>
@@ -1481,7 +1484,7 @@ export default function Dashboard() {
                 </div>
               </div>
             ) : (
-              <div className="h-[275px] w-full">
+              <div className="h-[235px] sm:h-[275px] w-full min-w-0">
                 {timeseries.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
                     当前筛选条件下暂无时序记录
@@ -1676,12 +1679,12 @@ export default function Dashboard() {
           <div
             className={`${
               dualChartCompare ? 'xl:col-span-12' : 'xl:col-span-5'
-            } bg-card border border-border/80 rounded-2xl p-5 shadow-sm flex flex-col justify-between`}
+            } bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm flex flex-col justify-between min-w-0 overflow-hidden`}
           >
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-baseline gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
+              <div className="flex items-baseline gap-2 flex-wrap">
                 <h3 className="text-sm font-bold tracking-wide text-foreground">最近请求</h3>
-                <span className="text-xs text-muted-foreground">点击模型/渠道/Key 可筛选</span>
+                <span className="text-[11px] sm:text-xs text-muted-foreground">点击模型/渠道/Key 可筛选</span>
               </div>
               <span className="text-xs text-muted-foreground tabular-nums">
                 共 {recentTotal.toLocaleString()} 条记录
@@ -1697,32 +1700,59 @@ export default function Dashboard() {
                 recentRequests.map(item => (
                   <div
                     key={item.id}
-                    className="py-2 flex items-center justify-between gap-2 text-xs hover:bg-muted/30 px-1.5 rounded-md transition-colors"
+                    className="py-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2 text-xs hover:bg-muted/30 px-1.5 rounded-md transition-colors min-w-0"
                   >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-mono text-[11px] text-muted-foreground tabular-nums shrink-0">
-                        {formatClockTime(item.timestamp)}
-                      </span>
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                          item.success ? 'bg-emerald-500' : 'bg-rose-500'
-                        }`}
-                        title={`HTTP ${item.status_code}`}
-                      />
-                      <div className="truncate flex items-center gap-1">
+                    <div className="flex items-center justify-between sm:justify-start gap-2 min-w-0">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono text-[11px] text-muted-foreground tabular-nums shrink-0">
+                          {formatClockTime(item.timestamp)}
+                        </span>
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            item.success ? 'bg-emerald-500' : 'bg-rose-500'
+                          }`}
+                          title={`HTTP ${item.status_code}`}
+                        />
+                        {item.key_label && (
+                          <button
+                            type="button"
+                            onClick={() => item.key_hash && toggleKeyFilter(item.key_hash)}
+                            className={`sm:hidden inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] border transition-colors shrink-0 ${
+                              item.key_hash && selectedKeys.includes(item.key_hash)
+                                ? 'bg-amber-500/20 text-amber-400 border-amber-500/40 font-semibold'
+                                : 'bg-muted/50 text-muted-foreground border-border/60 hover:text-foreground'
+                            }`}
+                            title={`API Key: ${item.key_label}${item.api_key_prefix ? ` (${item.api_key_prefix})` : ''} · 点击只看该 Key`}
+                          >
+                            <KeyRound className="w-2.5 h-2.5 text-amber-400" />
+                            <span className="max-w-[90px] truncate">{item.key_label}</span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="sm:hidden shrink-0 font-mono text-[11px] tabular-nums text-right">
+                        <span className="font-semibold text-foreground">
+                          {formatTokens(item.total_tokens)}
+                        </span>{' '}
+                        <span className="text-muted-foreground">tok</span>
+                        <span className="text-muted-foreground"> · {item.process_time.toFixed(1)}s</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 min-w-0 flex-1">
+                      <div className="flex items-center gap-1 min-w-0 flex-wrap sm:flex-nowrap">
                         <button
                           type="button"
                           onClick={() => toggleModelFilter(item.model)}
-                          className="font-semibold text-foreground hover:text-primary transition-colors truncate"
+                          className="font-semibold text-foreground hover:text-primary transition-colors truncate max-w-[170px] sm:max-w-[160px]"
                           title={`点击只看模型 ${item.model}`}
                         >
                           {item.model}
                         </button>
-                        <span className="text-muted-foreground">→</span>
+                        <span className="text-muted-foreground shrink-0">→</span>
                         <button
                           type="button"
                           onClick={() => toggleProviderFilter(item.provider)}
-                          className="text-muted-foreground hover:text-foreground transition-colors truncate"
+                          className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[130px] sm:max-w-[120px]"
                           title={`点击只看渠道 ${item.provider}`}
                         >
                           {item.provider}
@@ -1731,7 +1761,7 @@ export default function Dashboard() {
                           <button
                             type="button"
                             onClick={() => item.key_hash && toggleKeyFilter(item.key_hash)}
-                            className={`ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] border transition-colors shrink-0 ${
+                            className={`hidden sm:inline-flex ml-1 items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] border transition-colors shrink-0 ${
                               item.key_hash && selectedKeys.includes(item.key_hash)
                                 ? 'bg-amber-500/20 text-amber-400 border-amber-500/40 font-semibold'
                                 : 'bg-muted/50 text-muted-foreground border-border/60 hover:text-foreground'
@@ -1743,14 +1773,14 @@ export default function Dashboard() {
                           </button>
                         )}
                       </div>
-                    </div>
 
-                    <div className="shrink-0 font-mono text-[11px] tabular-nums text-right">
-                      <span className="font-semibold text-foreground">
-                        {formatTokens(item.total_tokens)}
-                      </span>{' '}
-                      <span className="text-muted-foreground">tok</span>
-                      <span className="text-muted-foreground"> · {item.process_time.toFixed(1)}s</span>
+                      <div className="hidden sm:block shrink-0 font-mono text-[11px] tabular-nums text-right">
+                        <span className="font-semibold text-foreground">
+                          {formatTokens(item.total_tokens)}
+                        </span>{' '}
+                        <span className="text-muted-foreground">tok</span>
+                        <span className="text-muted-foreground"> · {item.process_time.toFixed(1)}s</span>
+                      </div>
                     </div>
                   </div>
                 ))
@@ -1765,14 +1795,14 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-key-usage"
-        className="bg-card border border-border/80 rounded-2xl p-5 shadow-sm space-y-4"
+        className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-wrap">
-            <KeyRound className="w-4 h-4 text-amber-400" />
+            <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
             <h3 className="text-sm font-bold text-foreground">API Key 用量排行</h3>
             <span className="text-xs text-muted-foreground">
-              （共 {keyBreakdown.length} 条活跃 Key · 点击任意 Key 可联动全页筛选，点击「深度分析」可下钻查看 IP 与配额明细）
+              （共 {keyBreakdown.length} 条活跃 Key · 点击任意 Key 联动筛选，点击「深度分析」查看 IP 与配额）
             </span>
           </div>
           {selectedKeys.length > 0 && (
@@ -1792,10 +1822,10 @@ export default function Dashboard() {
             当前时间范围与筛选条件下暂无 API Key 用量记录
           </div>
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start min-w-0">
             {/* 左栏：Top Key Token & 费用占比可视化卡片 */}
-            <div className="xl:col-span-5 bg-muted/20 border border-border/60 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between text-xs">
+            <div className="xl:col-span-5 bg-muted/20 border border-border/60 rounded-xl p-3 sm:p-4 space-y-3 min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-1 text-xs">
                 <span className="font-semibold text-foreground">Top Key 消耗占比</span>
                 <span className="text-muted-foreground tabular-nums">
                   总计 {formatTokens(summary?.total_tokens || 0)} tok · ¥{(summary?.total_cost_cny || 0).toFixed(2)}
@@ -1808,21 +1838,21 @@ export default function Dashboard() {
                     <div
                       key={k.key_hash}
                       onClick={() => toggleKeyFilter(k.key_hash)}
-                      className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                      className={`p-2.5 rounded-xl border transition-all cursor-pointer min-w-0 ${
                         isSelected
                           ? 'bg-amber-500/10 border-amber-500/50 shadow-sm'
                           : 'bg-card/80 border-border/60 hover:border-border'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="flex items-start justify-between gap-2 text-xs min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0 flex-1">
                           <span
                             className="w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold text-white shrink-0"
                             style={{ backgroundColor: LINE_COLORS[idx % LINE_COLORS.length] }}
                           >
                             {idx + 1}
                           </span>
-                          <span className="font-semibold text-foreground truncate" title={k.key_label}>
+                          <span className="font-semibold text-foreground truncate max-w-[140px] sm:max-w-[180px]" title={k.key_label}>
                             {k.key_label}
                           </span>
                           {k.api_key_name && (
@@ -1844,9 +1874,26 @@ export default function Dashboard() {
                             </span>
                           )}
                         </div>
-                        <div className="shrink-0 font-mono text-xs tabular-nums">
-                          <span className="font-bold text-foreground">{formatTokens(k.total_tokens)}</span>
-                          <span className="text-muted-foreground ml-1">({k.token_share.toFixed(1)}%)</span>
+                        <div className="shrink-0 font-mono text-xs tabular-nums flex items-center gap-1.5">
+                          <span>
+                            <span className="font-bold text-foreground">{formatTokens(k.total_tokens)}</span>
+                            <span className="text-muted-foreground ml-0.5">({k.token_share.toFixed(1)}%)</span>
+                          </span>
+                          {k.can_drilldown && (
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                setAnalyticsTargetKey({
+                                  key_hash: k.key_hash,
+                                  key_label: k.key_label,
+                                });
+                              }}
+                              className="xl:hidden px-1.5 py-0.5 text-[10px] font-sans font-medium rounded bg-primary/10 text-primary border border-primary/30 whitespace-nowrap"
+                            >
+                              分析
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -1860,13 +1907,13 @@ export default function Dashboard() {
                         />
                       </div>
 
-                      <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted-foreground tabular-nums">
-                        <span>
+                      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px] text-muted-foreground tabular-nums">
+                        <span className="min-w-0 break-all sm:break-normal">
                           请求 <strong className="text-foreground/90">{k.requests.toLocaleString()}</strong> 次 · 缓存{' '}
                           <strong className="text-cyan-400">{k.cache_hit_rate.toFixed(1)}%</strong> · 主力{' '}
                           <strong className="text-foreground/90">{k.top_model}</strong>
                         </span>
-                        <span className="font-mono text-rose-400 font-semibold">
+                        <span className="font-mono text-rose-400 font-semibold shrink-0">
                           ¥{k.cost_cny.toFixed(2)} (${k.cost_usd.toFixed(2)})
                         </span>
                       </div>
@@ -1877,8 +1924,8 @@ export default function Dashboard() {
             </div>
 
             {/* 右栏：Key 用量速览与下钻表 */}
-            <div className="xl:col-span-7 overflow-x-auto border border-border/70 rounded-xl">
-              <table className="w-full text-left text-xs">
+            <div className="xl:col-span-7 overflow-x-auto border border-border/70 rounded-xl min-w-0 w-full">
+              <table className="w-full min-w-[680px] text-left text-xs whitespace-nowrap">
                 <thead className="bg-muted/60 text-muted-foreground font-medium">
                   <tr>
                     <th className="px-3.5 py-2.5">API Key 标识</th>
@@ -1963,7 +2010,7 @@ export default function Dashboard() {
                                   key_label: row.key_label,
                                 })
                               }
-                              className="px-2 py-1 text-[11px] font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 border border-primary/30 transition-colors"
+                              className="px-2 py-1 text-[11px] font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 border border-primary/30 transition-colors whitespace-nowrap"
                             >
                               深度分析
                             </button>
@@ -1984,17 +2031,17 @@ export default function Dashboard() {
       {/* =====================================================================
           3. 渠道与模型分布三联图（原版经典 3 图同屏：渠道成功率 + 模型分布 + Endpoint 分布）
          ===================================================================== */}
-      <div id="section-distributions" className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <div id="section-distributions" className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-w-0">
         {/* 渠道成功率 (%) */}
-        <div className="lg:col-span-5 bg-card border border-border/80 rounded-2xl p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
+        <div className="lg:col-span-5 bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm min-w-0 overflow-hidden">
+          <div className="flex items-center justify-between gap-2 mb-4">
             <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
-              <Cpu className="w-4 h-4 text-emerald-500" />
+              <Cpu className="w-4 h-4 text-emerald-500 shrink-0" />
               渠道成功率 (%)
             </h3>
             <span className="text-[11px] text-muted-foreground">点击柱子可筛选渠道</span>
           </div>
-          <div className="h-60">
+          <div className="h-56 sm:h-60 min-w-0">
             {formattedChannelStats.length === 0 ? (
               <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
                 暂无渠道数据
@@ -2036,15 +2083,15 @@ export default function Dashboard() {
         </div>
 
         {/* 模型请求量分布 */}
-        <div className="lg:col-span-4 bg-card border border-border/80 rounded-2xl p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
+        <div className="lg:col-span-4 bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm min-w-0 overflow-hidden">
+          <div className="flex items-center justify-between gap-2 mb-4">
             <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
-              <Activity className="w-4 h-4 text-blue-500" />
+              <Activity className="w-4 h-4 text-blue-500 shrink-0" />
               模型请求量分布
             </h3>
             <span className="text-[11px] text-muted-foreground">点击扇区可筛选模型</span>
           </div>
-          <div className="h-60">
+          <div className="h-60 min-w-0">
             {modelPieData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
                 暂无模型请求数据
@@ -2054,9 +2101,10 @@ export default function Dashboard() {
                 <PieChart>
                   <Pie
                     data={modelPieData}
-                    cx="38%"
-                    innerRadius={45}
-                    outerRadius={76}
+                    cx="50%"
+                    cy="44%"
+                    innerRadius={40}
+                    outerRadius={68}
                     paddingAngle={3}
                     dataKey="count"
                     nameKey="model"
@@ -2069,12 +2117,11 @@ export default function Dashboard() {
                   </Pie>
                   <Tooltip contentStyle={tooltipStyle} />
                   <Legend
-                    layout="vertical"
-                    align="right"
-                    verticalAlign="middle"
-                    wrapperStyle={{ paddingLeft: '8px', fontSize: '11px', maxWidth: '52%' }}
+                    verticalAlign="bottom"
+                    align="center"
+                    wrapperStyle={{ fontSize: '10px', paddingTop: '4px' }}
                     formatter={(value: string) => (
-                      <span className="text-foreground truncate block max-w-[130px]" title={value}>
+                      <span className="text-foreground truncate inline-block max-w-[115px] align-bottom" title={value}>
                         {value}
                       </span>
                     )}
@@ -2086,12 +2133,12 @@ export default function Dashboard() {
         </div>
 
         {/* 接口访问分布 (Endpoint) */}
-        <div className="lg:col-span-3 bg-card border border-border/80 rounded-2xl p-5 shadow-sm">
+        <div className="lg:col-span-3 bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm min-w-0 overflow-hidden">
           <h3 className="text-sm font-bold text-foreground mb-4 flex items-center gap-2">
-            <Server className="w-4 h-4 text-purple-500" />
+            <Server className="w-4 h-4 text-purple-500 shrink-0" />
             接口访问分布 (Endpoint)
           </h3>
-          <div className="h-60">
+          <div className="h-60 min-w-0">
             {formattedEndpointStats.length === 0 ? (
               <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
                 暂无接口数据
@@ -2101,8 +2148,10 @@ export default function Dashboard() {
                 <PieChart>
                   <Pie
                     data={formattedEndpointStats}
-                    innerRadius={38}
-                    outerRadius={72}
+                    cx="50%"
+                    cy="44%"
+                    innerRadius={36}
+                    outerRadius={66}
                     paddingAngle={2}
                     dataKey="value"
                     nameKey="name"
@@ -2118,7 +2167,7 @@ export default function Dashboard() {
                     verticalAlign="bottom"
                     wrapperStyle={{ fontSize: '10px' }}
                     formatter={(value: string) => (
-                      <span className="text-muted-foreground truncate inline-block max-w-[110px]" title={value}>
+                      <span className="text-muted-foreground truncate inline-block max-w-[110px] align-bottom" title={value}>
                         {value}
                       </span>
                     )}
@@ -2135,11 +2184,11 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-channel-health"
-        className="bg-card border border-border/80 rounded-2xl shadow-sm overflow-hidden"
+        className="bg-card border border-border/80 rounded-2xl shadow-sm overflow-hidden min-w-0"
       >
-        <div className="px-5 py-4 border-b border-border/70 bg-muted/20 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-primary" />
+        <div className="px-3.5 sm:px-5 py-3.5 sm:py-4 border-b border-border/70 bg-muted/20 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Cpu className="w-4 h-4 text-primary shrink-0" />
             <h3 className="text-sm font-bold text-foreground">渠道健康状况详细</h3>
             <span className="text-xs text-muted-foreground">
               （基于 channel_stats 真实尝试成功率 + 遥测性能指标）
@@ -2149,18 +2198,18 @@ export default function Dashboard() {
             共 {channelStats.length} 个渠道
           </span>
         </div>
-        <div className="overflow-x-auto max-h-[360px]">
-          <table className="w-full text-left text-xs">
+        <div className="overflow-x-auto max-h-[360px] w-full">
+          <table className="w-full min-w-[680px] text-left text-xs whitespace-nowrap">
             <thead className="bg-muted/70 text-muted-foreground font-medium sticky top-0 z-10">
               <tr>
-                <th className="px-5 py-3">渠道名称</th>
-                <th className="px-5 py-3">健康状态</th>
-                <th className="px-5 py-3 text-right">尝试请求数</th>
-                <th className="px-5 py-3 text-right">渠道成功率</th>
-                <th className="px-5 py-3 text-right">缓存命中率</th>
-                <th className="px-5 py-3 text-right">生成速度 / 首字</th>
-                <th className="px-5 py-3 text-right">Token 用量</th>
-                <th className="px-5 py-3 text-right">API 等价</th>
+                <th className="px-4 sm:px-5 py-3">渠道名称</th>
+                <th className="px-4 sm:px-5 py-3">健康状态</th>
+                <th className="px-4 sm:px-5 py-3 text-right">尝试请求数</th>
+                <th className="px-4 sm:px-5 py-3 text-right">渠道成功率</th>
+                <th className="px-4 sm:px-5 py-3 text-right">缓存命中率</th>
+                <th className="px-4 sm:px-5 py-3 text-right">生成速度 / 首字</th>
+                <th className="px-4 sm:px-5 py-3 text-right">Token 用量</th>
+                <th className="px-4 sm:px-5 py-3 text-right">API 等价</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50 tabular-nums">
@@ -2185,8 +2234,8 @@ export default function Dashboard() {
                       }`}
                       title="点击筛选该渠道"
                     >
-                      <td className="px-5 py-3 font-semibold text-foreground">{channel.provider}</td>
-                      <td className="px-5 py-3">
+                      <td className="px-4 sm:px-5 py-3 font-semibold text-foreground">{channel.provider}</td>
+                      <td className="px-4 sm:px-5 py-3">
                         <span
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
                             isHealthy
@@ -2204,10 +2253,10 @@ export default function Dashboard() {
                           {isHealthy ? '良好' : isWarning ? '警告' : '异常'}
                         </span>
                       </td>
-                      <td className="px-5 py-3 text-right text-muted-foreground">
+                      <td className="px-4 sm:px-5 py-3 text-right text-muted-foreground">
                         {channel.total_requests.toLocaleString()}
                       </td>
-                      <td className="px-5 py-3 text-right font-mono font-bold">
+                      <td className="px-4 sm:px-5 py-3 text-right font-mono font-bold">
                         <span
                           className={
                             isHealthy ? 'text-emerald-500' : isWarning ? 'text-amber-500' : 'text-red-500'
@@ -2216,18 +2265,18 @@ export default function Dashboard() {
                           {(channel.success_rate * 100).toFixed(1)}%
                         </span>
                       </td>
-                      <td className="px-5 py-3 text-right text-cyan-400 font-medium">
+                      <td className="px-4 sm:px-5 py-3 text-right text-cyan-400 font-medium">
                         {extra ? `${extra.cache_hit_rate.toFixed(1)}%` : '-'}
                       </td>
-                      <td className="px-5 py-3 text-right text-muted-foreground">
+                      <td className="px-4 sm:px-5 py-3 text-right text-muted-foreground">
                         {extra && extra.speed_tok_s > 0
                           ? `${extra.speed_tok_s.toFixed(1)} tok/s · ${extra.avg_ttft.toFixed(1)}s`
                           : '-'}
                       </td>
-                      <td className="px-5 py-3 text-right font-semibold text-foreground">
+                      <td className="px-4 sm:px-5 py-3 text-right font-semibold text-foreground">
                         {extra ? formatTokens(extra.total_tokens) : '-'}
                       </td>
-                      <td className="px-5 py-3 text-right text-rose-400 font-semibold">
+                      <td className="px-4 sm:px-5 py-3 text-right text-rose-400 font-semibold">
                         {extra ? `¥${extra.cost_cny.toFixed(2)}` : '-'}
                       </td>
                     </tr>
@@ -2244,10 +2293,10 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-heatmap"
-        className="bg-card border border-border/80 rounded-2xl p-5 shadow-sm space-y-4"
+        className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-baseline gap-2.5">
+          <div className="flex items-baseline gap-2.5 flex-wrap">
             <h3 className="text-sm font-bold tracking-wide text-foreground">工作回溯</h3>
             <span className="text-xs text-muted-foreground">
               近一年每日活动 {hasActiveFilter ? '（已按顶部所选模型/渠道过滤）' : ''}
@@ -2266,8 +2315,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-center">
-          <div className="xl:col-span-7 overflow-x-auto pb-1">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6 items-center min-w-0">
+          <div className="xl:col-span-7 overflow-x-auto pb-1 min-w-0 w-full">
             <div className="inline-block min-w-[640px]">
               <div className="relative h-4 mb-1 ml-6 text-[10px] text-muted-foreground select-none">
                 {heatmapGrid.monthHeaders.map((mh, idx) => (
@@ -2314,27 +2363,27 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="xl:col-span-5 grid grid-cols-2 gap-y-5 gap-x-8 pl-2 xl:border-l border-border/60">
+          <div className="xl:col-span-5 grid grid-cols-2 gap-y-3 sm:gap-y-5 gap-x-4 sm:gap-x-8 pt-2 xl:pt-0 xl:pl-4 border-t xl:border-t-0 xl:border-l border-border/60 min-w-0">
             <div>
-              <div className="text-xl font-bold tabular-nums text-foreground">
+              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
                 {heatmap?.active_days || 0}
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">天有活动</div>
             </div>
             <div>
-              <div className="text-xl font-bold tabular-nums text-foreground">
+              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
                 {(heatmap?.total_requests || 0).toLocaleString()}
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">总请求</div>
             </div>
             <div>
-              <div className="text-xl font-bold tabular-nums text-foreground">
+              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
                 {formatTokens(heatmap?.total_tokens || 0)}
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">总 Token</div>
             </div>
             <div>
-              <div className="text-xl font-bold tabular-nums text-foreground">
+              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
                 {(heatmap?.peak_day_requests || 0).toLocaleString()}
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">
@@ -2364,27 +2413,27 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-breakdown"
-        className="bg-card border border-border/80 rounded-2xl p-5 shadow-sm space-y-4"
+        className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
       >
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="w-4 h-4 text-blue-500" />
+        <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2.5 sm:gap-3 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <BarChart3 className="w-4 h-4 text-blue-500 shrink-0" />
             <h3 className="text-sm font-bold text-foreground">用量明细</h3>
             <span className="text-xs text-muted-foreground">
               （点击表格任意模型或渠道可一键联动全页筛选）
             </span>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:flex-wrap min-w-0 w-full sm:w-auto">
             {/* 表内快速搜索 */}
-            <div className="relative">
+            <div className="relative w-full sm:w-48">
               <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={tableSearch}
                 onChange={e => setTableSearch(e.target.value)}
                 placeholder="搜索 Key、模型或渠道..."
-                className="pl-8 pr-6 py-1 text-xs bg-background border border-border rounded-lg text-foreground w-48 focus:outline-none focus:ring-1 focus:ring-primary"
+                className="pl-8 pr-6 py-1.5 sm:py-1 text-xs bg-background border border-border rounded-lg text-foreground w-full focus:outline-none focus:ring-1 focus:ring-primary"
               />
               {tableSearch && (
                 <button
@@ -2397,7 +2446,7 @@ export default function Dashboard() {
               )}
             </div>
 
-            <div className="inline-flex items-center bg-muted/50 border border-border/80 rounded-lg p-0.5 gap-0.5 flex-wrap">
+            <div className="inline-flex items-center bg-muted/50 border border-border/80 rounded-lg p-0.5 gap-0.5 overflow-x-auto no-scrollbar max-w-full flex-nowrap sm:flex-wrap min-w-0">
               {[
                 { key: 'cross', label: `渠道 × 模型 (${filteredCrossRows.length})` },
                 { key: 'key', label: `按 Key 汇总 (${filteredKeyRows.length})` },
@@ -2411,7 +2460,7 @@ export default function Dashboard() {
                   onClick={() =>
                     setBreakdownTab(tab.key as 'cross' | 'key' | 'key_model' | 'model' | 'provider')
                   }
-                  className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                  className={`px-2.5 sm:px-3 py-1 text-xs font-medium rounded-md transition-all whitespace-nowrap shrink-0 ${
                     breakdownTab === tab.key
                       ? 'bg-card text-foreground shadow-sm border border-border/60 font-semibold'
                       : 'text-muted-foreground hover:text-foreground'
@@ -2426,8 +2475,8 @@ export default function Dashboard() {
 
         {/* 渠道 × 模型交叉明细表 */}
         {breakdownTab === 'cross' && (
-          <div className="overflow-x-auto border border-border/70 rounded-xl">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto border border-border/70 rounded-xl w-full">
+            <table className="w-full min-w-[720px] text-left text-xs whitespace-nowrap">
               <thead className="bg-muted/60 text-muted-foreground font-medium">
                 <tr>
                   <th className="px-4 py-3">渠道</th>
@@ -2518,8 +2567,8 @@ export default function Dashboard() {
 
         {/* 按 Key 汇总明细表 */}
         {breakdownTab === 'key' && (
-          <div className="overflow-x-auto border border-border/70 rounded-xl">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto border border-border/70 rounded-xl w-full">
+            <table className="w-full min-w-[780px] text-left text-xs whitespace-nowrap">
               <thead className="bg-muted/60 text-muted-foreground font-medium">
                 <tr>
                   <th className="px-4 py-3">API Key 名称 / 前缀</th>
@@ -2627,8 +2676,8 @@ export default function Dashboard() {
 
         {/* Key × 模型交叉明细表 */}
         {breakdownTab === 'key_model' && (
-          <div className="overflow-x-auto border border-border/70 rounded-xl">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto border border-border/70 rounded-xl w-full">
+            <table className="w-full min-w-[720px] text-left text-xs whitespace-nowrap">
               <thead className="bg-muted/60 text-muted-foreground font-medium">
                 <tr>
                   <th className="px-4 py-3">API Key</th>
@@ -2722,8 +2771,8 @@ export default function Dashboard() {
 
         {/* 按模型汇总明细表 */}
         {breakdownTab === 'model' && (
-          <div className="overflow-x-auto border border-border/70 rounded-xl">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto border border-border/70 rounded-xl w-full">
+            <table className="w-full min-w-[680px] text-left text-xs whitespace-nowrap">
               <thead className="bg-muted/60 text-muted-foreground font-medium">
                 <tr>
                   <th className="px-4 py-3">模型名称</th>
@@ -2786,8 +2835,8 @@ export default function Dashboard() {
 
         {/* 按渠道汇总明细表 */}
         {breakdownTab === 'provider' && (
-          <div className="overflow-x-auto border border-border/70 rounded-xl">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto border border-border/70 rounded-xl w-full">
+            <table className="w-full min-w-[640px] text-left text-xs whitespace-nowrap">
               <thead className="bg-muted/60 text-muted-foreground font-medium">
                 <tr>
                   <th className="px-4 py-3">渠道名称</th>
