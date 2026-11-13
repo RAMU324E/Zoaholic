@@ -392,6 +392,19 @@ async def _update_git(steps: list) -> JSONResponse:
     cwd = _get_source_dir()
     prod_dir = os.getenv("ZOAHOLIC_PROD_DIR", "/www/wwwroot/Zoaholic")
 
+    # Step 0: 记录 pull 前的 HEAD，避免多 commit 合并拉取时 HEAD~1 漏检 frontend 变更
+    old_head = "HEAD~1"
+    try:
+        r_head = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=cwd, timeout=5
+        )
+        if r_head.returncode == 0 and r_head.stdout.strip():
+            old_head = r_head.stdout.strip()
+    except Exception:
+        pass
+
     # Step 1: git pull
     result = await asyncio.to_thread(
         subprocess.run,
@@ -414,17 +427,34 @@ async def _update_git(steps: list) -> JSONResponse:
     else:
         steps.append({"step": "sync_backend", "success": True, "output": "same dir, skipped"})
 
-    # Step 4: 前端 build（如有变更）
+    # Step 4: 前端 build（对比 old_head..HEAD 是否有 frontend/ 变更，或 static/ 产物比 frontend/src 旧）
     frontend_changed = False
     try:
         r = await asyncio.to_thread(
             subprocess.run,
-            ["git", "diff", "HEAD~1", "--name-only", "--", "frontend/"],
+            ["git", "diff", old_head, "HEAD", "--name-only", "--", "frontend/"],
             capture_output=True, text=True, cwd=cwd, timeout=5
         )
         frontend_changed = bool(r.stdout.strip())
     except Exception:
         pass
+
+    if not frontend_changed:
+        try:
+            static_index = Path(prod_dir) / "static" / "index.html"
+            src_root = Path(cwd) / "frontend" / "src"
+            if not static_index.exists():
+                frontend_changed = True
+            elif src_root.is_dir():
+                static_mtime = static_index.stat().st_mtime
+                latest_src_mtime = max(
+                    (p.stat().st_mtime for p in src_root.rglob("*") if p.is_file()),
+                    default=0.0,
+                )
+                if latest_src_mtime > static_mtime:
+                    frontend_changed = True
+        except Exception:
+            pass
 
     if frontend_changed:
         frontend_dir = os.path.join(cwd, "frontend")

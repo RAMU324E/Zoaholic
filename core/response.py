@@ -98,6 +98,16 @@ def _save_upstream_response_headers(response, captured_info):
         pass
 
 
+def _set_response_method(response, attr_name: str, fn) -> None:
+    try:
+        setattr(response, attr_name, fn)
+    except AttributeError:
+        try:
+            object.__setattr__(response, attr_name, fn)
+        except Exception as e:
+            logger.error(f"Failed to wrap response.{attr_name}: {str(e)}")
+
+
 def _wrap_response_iterators(response):
     if getattr(response, "_zoaholic_capture_wrapped", False):
         return
@@ -105,26 +115,24 @@ def _wrap_response_iterators(response):
     if not should_save:
         return
     response._zoaholic_capture_wrapped = True
-    if should_save:
-        # 修改原因：流式响应的响应体要等迭代结束才能保存，但响应头在 response 对象创建后已经可用。
-        # 修改方式：包装迭代器前先从 response.headers 保存已脱敏响应头。
-        # 目的：确保 aiter_text、aiter_bytes 和 aread 三种读取路径都能共享同一份响应头采集逻辑。
-        _save_upstream_response_headers(response, captured_info)
-    _wrap_response_aiter_text(response)
-    _wrap_response_aiter_bytes(response)
-    _wrap_response_aread(response)
+    # 修改原因：流式响应的响应体要等迭代结束才能保存，但响应头在 response 对象创建后已经可用。
+    # 修改方式：包装迭代器前先从 response.headers 保存已脱敏响应头。
+    # 目的：确保 aiter_text、aiter_bytes 和 aread 三种读取路径都能共享同一份响应头采集逻辑。
+    _save_upstream_response_headers(response, captured_info)
+    _wrap_response_aiter_text(response, captured_info)
+    _wrap_response_aiter_bytes(response, captured_info)
+    _wrap_response_aread(response, captured_info)
 
 
-def _wrap_response_aiter_text(response):
+def _wrap_response_aiter_text(response, captured_info=None):
     """
     包装 httpx response 的 aiter_text 方法，自动记录上游原始响应
     """
     original_aiter_text = WeakMethod(response.aiter_text)
-    
-    captured_info, should_save = _get_response_capture_state()
-
-    if not should_save:
-        return
+    if captured_info is None:
+        captured_info, should_save = _get_response_capture_state()
+        if not should_save:
+            return
     
     async def logging_aiter_text(*args, **kwargs):
         """包装后的 aiter_text，自动记录数据"""
@@ -160,16 +168,10 @@ def _wrap_response_aiter_text(response):
                     logger.error(f"Error saving upstream response body: {str(e)}")
             await close_async_iterator(iterator)
     
-    try:
-        response.aiter_text = logging_aiter_text
-    except AttributeError:
-        try:
-            object.__setattr__(response, 'aiter_text', logging_aiter_text)
-        except Exception as e:
-            logger.error(f"Failed to wrap response.aiter_text: {str(e)}")
+    _set_response_method(response, "aiter_text", logging_aiter_text)
 
 
-def _wrap_response_aiter_bytes(response):
+def _wrap_response_aiter_bytes(response, captured_info=None):
     """
     包装 httpx response 的 aiter_bytes 方法，自动记录上游原始响应
     """
@@ -177,10 +179,10 @@ def _wrap_response_aiter_bytes(response):
         return
 
     original_aiter_bytes = WeakMethod(response.aiter_bytes)
-    captured_info, should_save = _get_response_capture_state()
-
-    if not should_save:
-        return
+    if captured_info is None:
+        captured_info, should_save = _get_response_capture_state()
+        if not should_save:
+            return
 
     async def logging_aiter_bytes(*args, **kwargs):
         upstream_chunks = []
@@ -211,16 +213,10 @@ def _wrap_response_aiter_bytes(response):
                     logger.error(f"Error saving upstream byte response body: {str(e)}")
             await close_async_iterator(iterator)
 
-    try:
-        response.aiter_bytes = logging_aiter_bytes
-    except AttributeError:
-        try:
-            object.__setattr__(response, 'aiter_bytes', logging_aiter_bytes)
-        except Exception as e:
-            logger.error(f"Failed to wrap response.aiter_bytes: {str(e)}")
+    _set_response_method(response, "aiter_bytes", logging_aiter_bytes)
 
 
-def _wrap_response_aread(response):
+def _wrap_response_aread(response, captured_info=None):
     """
     包装 httpx response 的 aread 方法，自动记录上游原始响应。
 
@@ -232,10 +228,10 @@ def _wrap_response_aread(response):
         return
 
     original_aread = WeakMethod(response.aread)
-    captured_info, should_save = _get_response_capture_state()
-
-    if not should_save:
-        return
+    if captured_info is None:
+        captured_info, should_save = _get_response_capture_state()
+        if not should_save:
+            return
 
     async def logging_aread(*args, **kwargs):
         """包装后的 aread，自动记录数据，不持有 response 强引用。"""
@@ -247,13 +243,7 @@ def _wrap_response_aread(response):
                 logger.error(f"Error saving upstream response body (aread): {str(e)}")
         return result
 
-    try:
-        response.aread = logging_aread
-    except AttributeError:
-        try:
-            object.__setattr__(response, 'aread', logging_aread)
-        except Exception as e:
-            logger.error(f"Failed to wrap response.aread: {str(e)}")
+    _set_response_method(response, "aread", logging_aread)
 
 
 def _save_upstream_response_for_non_stream(response):

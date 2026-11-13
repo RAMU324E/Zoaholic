@@ -11,10 +11,11 @@
  *    - Group spacing: outer gap between sections (space-y-5) > inner card padding (p-5) > intra-metric gap (gap-1.5).
  */
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef, useCallback, memo } from 'react';
 import {
   Activity, Cpu, BarChart3, AlertCircle, CheckCircle2,
-  RefreshCw, Server, Search, X, ArrowUp, Filter, Calendar, Layers, KeyRound
+  RefreshCw, Server, Search, X, ArrowUp, Filter, Calendar, Layers, KeyRound,
+  ChevronDown, ChevronUp
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
@@ -450,6 +451,293 @@ function SuccessDonutGauge({
   );
 }
 
+const getHeatmapCellColor = (reqs: number, maxReqs: number): string => {
+  if (reqs <= 0) return 'bg-muted/70 dark:bg-[#2a2927]';
+  const ratio = reqs / maxReqs;
+  if (ratio < 0.15) return 'bg-[#6b4c3e]';
+  if (ratio < 0.4) return 'bg-[#9a5b42]';
+  if (ratio < 0.7) return 'bg-[#c96a48]';
+  return 'bg-[#ef7d52] shadow-[0_0_6px_rgba(239,125,82,0.45)]';
+};
+
+/** 独立导航胶囊与回到顶部组件：将滚动监听状态完全隔离在小组件内，页面滚动时主 Dashboard 0 次重渲染 */
+const ScrollSpyNavPills = memo(function ScrollSpyNavPills({
+  onJump,
+}: {
+  onJump: (id: string) => void;
+}) {
+  const [activeAnchor, setActiveAnchor] = useState<string>('section-overview');
+
+  useEffect(() => {
+    const scrollEl = document.getElementById('app-main-scroll');
+    if (!scrollEl) return;
+
+    let timer: number | null = null;
+    const onScroll = () => {
+      if (timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        const containerTop = scrollEl.getBoundingClientRect().top;
+        let currentSection: string = NAV_SECTIONS[0].id;
+        for (const sec of NAV_SECTIONS) {
+          const dom = document.getElementById(sec.id);
+          if (dom && dom.getBoundingClientRect().top - containerTop <= 180) {
+            currentSection = sec.id;
+          }
+        }
+        setActiveAnchor(prev => (prev === currentSection ? prev : currentSection));
+      }, 160);
+    };
+
+    scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      scrollEl.removeEventListener('scroll', onScroll);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  return (
+    <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap pb-0.5 sm:pb-0">
+      {NAV_SECTIONS.map(nav => {
+        const isActive = activeAnchor === nav.id;
+        return (
+          <button
+            key={nav.id}
+            type="button"
+            onClick={() => {
+              setActiveAnchor(nav.id);
+              onJump(nav.id);
+            }}
+            className={`px-2.5 py-1 text-xs font-medium rounded-full whitespace-nowrap shrink-0 ${
+              isActive
+                ? 'bg-primary/15 text-primary border border-primary/40 font-semibold'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/60 border border-transparent'
+            }`}
+          >
+            {nav.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+});
+
+const BackToTopButton = memo(function BackToTopButton({
+  onClick,
+}: {
+  onClick: () => void;
+}) {
+  const [isScrolled, setIsScrolled] = useState(false);
+
+  useEffect(() => {
+    const scrollEl = document.getElementById('app-main-scroll');
+    if (!scrollEl) return;
+
+    let timer: number | null = null;
+    const onScroll = () => {
+      if (timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        const next = scrollEl.scrollTop > 80;
+        setIsScrolled(prev => (prev === next ? prev : next));
+      }, 160);
+    };
+
+    scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      scrollEl.removeEventListener('scroll', onScroll);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="回到顶部"
+      className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-xl border whitespace-nowrap ${
+        isScrolled
+          ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+          : 'text-muted-foreground hover:text-foreground bg-muted/40 border-border/80'
+      }`}
+    >
+      <ArrowUp className="w-3.5 h-3.5" />
+      <span className="hidden sm:inline">回到顶部</span>
+    </button>
+  );
+});
+
+/** 独立热力图子组件：使用 DOM ref 直接更新悬浮提示文本，鼠标滑过 365 天格子时 0 次 React 重渲染 */
+const ActivityHeatmapSection = memo(function ActivityHeatmapSection({
+  heatmap,
+  hasActiveFilter,
+}: {
+  heatmap: ActivityHeatmapData | null;
+  hasActiveFilter: boolean;
+}) {
+  const hoverLabelRef = useRef<HTMLSpanElement | null>(null);
+  const defaultSummaryText = `${heatmap?.active_days || 0} 天有活动 · 共 ${(heatmap?.total_requests || 0).toLocaleString()} 次请求`;
+
+  useEffect(() => {
+    if (hoverLabelRef.current) {
+      hoverLabelRef.current.textContent = defaultSummaryText;
+    }
+  }, [defaultSummaryText]);
+
+  const heatmapGrid = useMemo(() => {
+    const days = heatmap?.days || [];
+    if (days.length === 0) return { weeks: [], monthHeaders: [], maxReqs: 1 };
+
+    const maxReqs = Math.max(...days.map(d => d.requests), 1);
+    const firstDate = new Date(days[0].date + 'T00:00:00');
+    const firstWeekday = (firstDate.getDay() + 6) % 7;
+    const padded: (HeatmapDay | null)[] = Array(firstWeekday).fill(null).concat(days);
+    const weeks: (HeatmapDay | null)[][] = [];
+    for (let i = 0; i < padded.length; i += 7) {
+      const col = padded.slice(i, i + 7);
+      while (col.length < 7) col.push(null);
+      weeks.push(col);
+    }
+
+    const monthHeaders: { colIndex: number; label: string }[] = [];
+    let lastMonth = -1;
+    weeks.forEach((col, wIdx) => {
+      const firstValid = col.find(c => c !== null);
+      if (firstValid) {
+        const m = Number(firstValid.date.slice(5, 7));
+        if (m !== lastMonth) {
+          if (monthHeaders.length === 0 || wIdx - monthHeaders[monthHeaders.length - 1].colIndex >= 3) {
+            monthHeaders.push({ colIndex: wIdx, label: `${m}月` });
+          }
+          lastMonth = m;
+        }
+      }
+    });
+
+    return { weeks, monthHeaders, maxReqs };
+  }, [heatmap]);
+
+  return (
+    <div
+      id="section-heatmap"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: '0 250px' }}
+      className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-baseline gap-2.5 flex-wrap">
+          <h3 className="text-sm font-bold tracking-wide text-foreground">工作回溯</h3>
+          <span className="text-xs text-muted-foreground">
+            近一年每日活动 {hasActiveFilter ? '（已按顶部所选模型/渠道/Key 过滤）' : ''}
+          </span>
+        </div>
+        <div className="text-xs text-muted-foreground tabular-nums">
+          <span ref={hoverLabelRef}>{defaultSummaryText}</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6 items-center min-w-0">
+        <div className="xl:col-span-7 overflow-x-auto pb-1 min-w-0 w-full">
+          <div className="inline-block min-w-[640px]">
+            <div className="relative h-4 mb-1 ml-6 text-[10px] text-muted-foreground select-none">
+              {heatmapGrid.monthHeaders.map((mh, idx) => (
+                <span key={idx} className="absolute" style={{ left: `${mh.colIndex * 13}px` }}>
+                  {mh.label}
+                </span>
+              ))}
+            </div>
+
+            <div className="flex items-start gap-1.5">
+              <div className="grid grid-rows-7 gap-[3px] text-[10px] text-muted-foreground pr-1 select-none leading-[10px]">
+                <span className="h-[10px] flex items-center">一</span>
+                <span className="h-[10px]" />
+                <span className="h-[10px] flex items-center">三</span>
+                <span className="h-[10px]" />
+                <span className="h-[10px] flex items-center">五</span>
+                <span className="h-[10px]" />
+                <span className="h-[10px]" />
+              </div>
+
+              <div
+                className="flex gap-[3px]"
+                onMouseLeave={() => {
+                  if (hoverLabelRef.current) {
+                    hoverLabelRef.current.textContent = defaultSummaryText;
+                  }
+                }}
+              >
+                {heatmapGrid.weeks.map((week, wIdx) => (
+                  <div key={wIdx} className="grid grid-rows-7 gap-[3px]">
+                    {week.map((day, dIdx) =>
+                      day === null ? (
+                        <span key={dIdx} className="w-[10px] h-[10px] rounded-[2px] opacity-0" />
+                      ) : (
+                        <span
+                          key={day.date}
+                          onMouseEnter={() => {
+                            if (hoverLabelRef.current) {
+                              hoverLabelRef.current.textContent = `${day.date} · ${day.requests.toLocaleString()} 次请求 · ${formatTokens(day.total_tokens)} tokens`;
+                            }
+                          }}
+                          className={`w-[10px] h-[10px] rounded-[2px] hover:ring-1 hover:ring-foreground/70 ${getHeatmapCellColor(
+                            day.requests,
+                            heatmapGrid.maxReqs
+                          )}`}
+                        />
+                      )
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-5 grid grid-cols-2 gap-y-3 sm:gap-y-5 gap-x-4 sm:gap-x-8 pt-2 xl:pt-0 xl:pl-4 border-t xl:border-t-0 xl:border-l border-border/60 min-w-0">
+          <div>
+            <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
+              {heatmap?.active_days || 0}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">天有活动</div>
+          </div>
+          <div>
+            <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
+              {(heatmap?.total_requests || 0).toLocaleString()}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">总请求</div>
+          </div>
+          <div>
+            <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
+              {formatTokens(heatmap?.total_tokens || 0)}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">总 Token</div>
+          </div>
+          <div>
+            <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
+              {(heatmap?.peak_day_requests || 0).toLocaleString()}
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              峰值单日 · {heatmap?.peak_day_date || '--'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
+        <span>近一年 {formatTokens(heatmap?.total_tokens || 0)} tokens</span>
+        <div className="flex items-center gap-1">
+          <span>少</span>
+          <span className="w-2.5 h-2.5 rounded-[2px] bg-muted/70 dark:bg-[#2a2927]" />
+          <span className="w-2.5 h-2.5 rounded-[2px] bg-[#6b4c3e]" />
+          <span className="w-2.5 h-2.5 rounded-[2px] bg-[#9a5b42]" />
+          <span className="w-2.5 h-2.5 rounded-[2px] bg-[#c96a48]" />
+          <span className="w-2.5 h-2.5 rounded-[2px] bg-[#ef7d52]" />
+          <span>多</span>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 export default function Dashboard() {
   const { token } = useAuthStore();
 
@@ -464,20 +752,26 @@ export default function Dashboard() {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [showProviderDrawer, setShowProviderDrawer] = useState(false);
   const [showKeyDrawer, setShowKeyDrawer] = useState(false);
+  const [showAllModels, setShowAllModels] = useState(false);
+  // 默认折叠筛选栏（除非用户主动设置为展开 '0'），保持顶部吸顶栏轻巧不挡屏
+  const [filtersCollapsed, setFiltersCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('zoa_dashboard_filters_collapsed') !== '0';
+    } catch {
+      return true;
+    }
+  });
   const [analyticsTargetKey, setAnalyticsTargetKey] = useState<{ key_hash: string; key_label: string } | null>(null);
-
-  // 导航与滚动监听状态
-  const [activeAnchor, setActiveAnchor] = useState<string>('section-overview');
-  const [isScrolled, setIsScrolled] = useState(false);
 
   // 时序图模式：token (Token+请求) | cache (缓存/未缓存/输出堆叠) | models (分模型折线) | keys (分Key折线) | requests (成功/失败) | throughput (吞吐/首字)
   const [chartMode, setChartMode] = useState<'token' | 'cache' | 'models' | 'keys' | 'requests' | 'throughput'>('token');
   // 是否展开双图并排视图（左边所选时序 + 右边分模型/缓存堆叠对比）
   const [dualChartCompare, setDualChartCompare] = useState(false);
 
-  // 底部明细表 Tab 与搜索
+  // 底部明细表 Tab、搜索与展开控制
   const [breakdownTab, setBreakdownTab] = useState<'cross' | 'key' | 'key_model' | 'model' | 'provider'>('cross');
   const [tableSearch, setTableSearch] = useState('');
+  const [showAllBreakdownRows, setShowAllBreakdownRows] = useState(false);
 
   // 后端数据状态
   const [loading, setLoading] = useState(true);
@@ -499,18 +793,38 @@ export default function Dashboard() {
   const [crossBreakdown, setCrossBreakdown] = useState<CrossBreakdownRow[]>([]);
   const [keyModelBreakdown, setKeyModelBreakdown] = useState<KeyModelBreakdownRow[]>([]);
   const [stats, setStats] = useState<StatData | null>(null);
-  const [hoveredDay, setHoveredDay] = useState<HeatmapDay | null>(null);
 
-  const fetchDashboard = async () => {
+  // 记录上一次热力图的过滤签名，未变时切换顶部时间范围无需重复扫描 365 天热力图
+  const lastHeatmapFilterSigRef = useRef<string | null>(null);
+
+  const toggleFiltersCollapsed = useCallback(() => {
+    setFiltersCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('zoa_dashboard_filters_collapsed', next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  const fetchDashboard = useCallback(async (forceRefresh = false) => {
     if (!token) return;
     setLoading(true);
     const hours = RANGE_OPTIONS.find(r => r.key === rangeKey)?.hours || 72;
     const tzOffset = new Date().getTimezoneOffset();
 
+    const filterSig = `${[...selectedModels].sort().join(',')}|${[...selectedProviders].sort().join(',')}|${[...selectedKeys].sort().join(',')}|${tzOffset}`;
+    const needHeatmap = forceRefresh || lastHeatmapFilterSigRef.current !== filterSig;
+
     const params = new URLSearchParams();
     params.set('range_key', rangeKey);
     params.set('tz_offset_minutes', String(tzOffset));
-    params.set('recent_limit', '80');
+    params.set('recent_limit', '35');
+    // 首屏/主查询跳过 365 天热力图，使 KPI 与时序图毫秒级返回；热力图延后异步加载
+    params.set('include_heatmap', 'false');
+    if (forceRefresh) params.set('force_refresh', 'true');
     if (customStart) params.set('start_datetime', new Date(customStart).toISOString());
     if (customEnd) params.set('end_datetime', new Date(customEnd).toISOString());
     if (selectedModels.length > 0) params.set('model', selectedModels.join(','));
@@ -518,10 +832,7 @@ export default function Dashboard() {
     if (selectedKeys.length > 0) params.set('key_hash', selectedKeys.join(','));
 
     try {
-      const [overviewRes, statsRes] = await Promise.all([
-        apiFetch(`/v1/stats/dashboard_overview?${params.toString()}`),
-        apiFetch(`/v1/stats?hours=${hours}`),
-      ]);
+      const overviewRes = await apiFetch(`/v1/stats/dashboard_overview?${params.toString()}`);
 
       if (overviewRes.ok) {
         const data = await overviewRes.json();
@@ -537,15 +848,46 @@ export default function Dashboard() {
           setAvailableKeys(data.available_keys || []);
           setRecentRequests(data.recent_requests || []);
           setRecentTotal(data.recent_total || 0);
-          setHeatmap(data.activity_heatmap || null);
           setModelBreakdown(data.model_breakdown || []);
           setProviderBreakdown(data.provider_breakdown || []);
           setKeyBreakdown(data.key_breakdown || []);
           setCrossBreakdown(data.cross_breakdown || []);
           setKeyModelBreakdown(data.key_model_breakdown || []);
+          setStats({
+            time_range: rangeKey,
+            channel_success_rates: data.channel_success_rates || [],
+            model_request_counts: (data.model_breakdown || []).map((m: BreakdownRow) => ({
+              model: m.model || 'unknown',
+              count: m.requests,
+            })),
+            endpoint_request_counts: data.endpoint_request_counts || [],
+          });
+
+          if (needHeatmap) {
+            const hmParams = new URLSearchParams(params);
+            hmParams.set('include_heatmap', 'true');
+            hmParams.set('recent_limit', '10');
+            window.setTimeout(async () => {
+              try {
+                const hmRes = await apiFetch(`/v1/stats/dashboard_overview?${hmParams.toString()}`);
+                if (hmRes.ok) {
+                  const hmData = await hmRes.json();
+                  if (hmData.activity_heatmap) {
+                    setHeatmap(hmData.activity_heatmap);
+                    lastHeatmapFilterSigRef.current = filterSig;
+                  }
+                }
+              } catch {
+                // ignore background heatmap error
+              }
+            }, 80);
+          }
+          return;
         }
       }
 
+      // 仅当 DISABLE_DATABASE=true 导致 dashboard_overview 返回 empty 时，才降级请求 /v1/stats 内存统计
+      const statsRes = await apiFetch(`/v1/stats?hours=${hours}`);
       if (statsRes.ok) {
         const sData = await statsRes.json();
         setStats(sData.stats || sData);
@@ -555,42 +897,13 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchDashboard();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, rangeKey, selectedModels, selectedProviders, selectedKeys, customStart, customEnd]);
 
-  // 监听外层 #app-main-scroll 滚动容器，实现 ScrollSpy 高亮与回到顶部状态感知
   useEffect(() => {
-    const scrollEl = document.getElementById('app-main-scroll');
-    if (!scrollEl) return;
+    fetchDashboard(false);
+  }, [fetchDashboard]);
 
-    const onScroll = () => {
-      const st = scrollEl.scrollTop;
-      setIsScrolled(st > 80);
-
-      let currentSection: string = NAV_SECTIONS[0].id;
-      for (const sec of NAV_SECTIONS) {
-        const dom = document.getElementById(sec.id);
-        if (dom) {
-          const rect = dom.getBoundingClientRect();
-          const containerRect = scrollEl.getBoundingClientRect();
-          if (rect.top - containerRect.top <= 180) {
-            currentSection = sec.id;
-          }
-        }
-      }
-      setActiveAnchor(currentSection);
-    };
-
-    scrollEl.addEventListener('scroll', onScroll, { passive: true });
-    return () => scrollEl.removeEventListener('scroll', onScroll);
-  }, []);
-
-  const scrollToSection = (id: string) => {
-    setActiveAnchor(id);
+  const scrollToSection = useCallback((id: string) => {
     const scrollEl = document.getElementById('app-main-scroll');
     const target = document.getElementById(id);
     if (scrollEl && target) {
@@ -603,16 +916,16 @@ export default function Dashboard() {
     } else if (target) {
       target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  };
+  }, []);
 
-  const scrollToTop = () => {
+  const scrollToTop = useCallback(() => {
     const scrollEl = document.getElementById('app-main-scroll');
     if (scrollEl) {
       scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-  };
+  }, []);
 
   const toggleModelFilter = (modelName: string) => {
     setSelectedModels(prev =>
@@ -641,11 +954,19 @@ export default function Dashboard() {
     setCustomEnd('');
   };
 
-  const hasActiveFilter =
-    selectedModels.length > 0 ||
-    selectedProviders.length > 0 ||
-    selectedKeys.length > 0 ||
-    Boolean(customStart || customEnd);
+  const activeFilterCount =
+    selectedModels.length +
+    selectedProviders.length +
+    selectedKeys.length +
+    (customStart || customEnd ? 1 : 0);
+
+  const hasActiveFilter = activeFilterCount > 0;
+
+  const keyLabelMap = useMemo(() => {
+    const map = new Map<string, string>();
+    availableKeys.forEach(k => map.set(k.key_hash, k.key_label));
+    return map;
+  }, [availableKeys]);
 
   // 原版分布数据与过滤后数据的有机结合
   const channelStats = useMemo(() => {
@@ -692,12 +1013,28 @@ export default function Dashboard() {
     [stats]
   );
 
-  // Sparkline 序列提取
-  const tokenSeries = useMemo(() => timeseries.map(p => p.total_tokens), [timeseries]);
-  const reqSeries = useMemo(() => timeseries.map(p => p.requests), [timeseries]);
-  const speedSeries = useMemo(() => timeseries.map(p => p.speed_tok_s), [timeseries]);
-  const cacheRateSeries = useMemo(() => timeseries.map(p => p.cache_hit_rate), [timeseries]);
-  const costSeries = useMemo(() => timeseries.map(p => p.cost_cny), [timeseries]);
+  // Sparkline 序列单遍提取
+  const { tokenSeries, reqSeries, speedSeries, cacheRateSeries, costSeries } = useMemo(() => {
+    const tok: number[] = [];
+    const req: number[] = [];
+    const spd: number[] = [];
+    const cache: number[] = [];
+    const cost: number[] = [];
+    for (const p of timeseries) {
+      tok.push(p.total_tokens);
+      req.push(p.requests);
+      spd.push(p.speed_tok_s);
+      cache.push(p.cache_hit_rate);
+      cost.push(p.cost_cny);
+    }
+    return {
+      tokenSeries: tok,
+      reqSeries: req,
+      speedSeries: spd,
+      cacheRateSeries: cache,
+      costSeries: cost,
+    };
+  }, [timeseries]);
 
   // Token 消耗构成比例条
   const tokenSegments = useMemo(() => {
@@ -711,49 +1048,6 @@ export default function Dashboard() {
       compPct: Math.max(1.5, Math.min(100, (comp / total) * 100)),
     };
   }, [summary]);
-
-  // 工作回溯（近一年 53 周 × 7 天）矩阵构造
-  const heatmapGrid = useMemo(() => {
-    const days = heatmap?.days || [];
-    if (days.length === 0) return { weeks: [], monthHeaders: [], maxReqs: 1 };
-
-    const maxReqs = Math.max(...days.map(d => d.requests), 1);
-    const firstDate = new Date(days[0].date + 'T00:00:00');
-    const firstWeekday = (firstDate.getDay() + 6) % 7;
-    const padded: (HeatmapDay | null)[] = Array(firstWeekday).fill(null).concat(days);
-    const weeks: (HeatmapDay | null)[][] = [];
-    for (let i = 0; i < padded.length; i += 7) {
-      const col = padded.slice(i, i + 7);
-      while (col.length < 7) col.push(null);
-      weeks.push(col);
-    }
-
-    const monthHeaders: { colIndex: number; label: string }[] = [];
-    let lastMonth = -1;
-    weeks.forEach((col, wIdx) => {
-      const firstValid = col.find(c => c !== null);
-      if (firstValid) {
-        const m = Number(firstValid.date.slice(5, 7));
-        if (m !== lastMonth) {
-          if (monthHeaders.length === 0 || wIdx - monthHeaders[monthHeaders.length - 1].colIndex >= 3) {
-            monthHeaders.push({ colIndex: wIdx, label: `${m}月` });
-          }
-          lastMonth = m;
-        }
-      }
-    });
-
-    return { weeks, monthHeaders, maxReqs };
-  }, [heatmap]);
-
-  const getHeatmapCellColor = (reqs: number, maxReqs: number): string => {
-    if (reqs <= 0) return 'bg-muted/70 dark:bg-[#2a2927]';
-    const ratio = reqs / maxReqs;
-    if (ratio < 0.15) return 'bg-[#6b4c3e]';
-    if (ratio < 0.4) return 'bg-[#9a5b42]';
-    if (ratio < 0.7) return 'bg-[#c96a48]';
-    return 'bg-[#ef7d52] shadow-[0_0_6px_rgba(239,125,82,0.45)]';
-  };
 
   // 建立渠道快速检索映射（在渠道健康表上附加缓存率、Token、速度、成本）
   const providerExtraMap = useMemo(() => {
@@ -835,30 +1129,11 @@ export default function Dashboard() {
              - 随页面滚动常驻顶部，使「模块跳转」「时间/模型切换」「回到顶部」真正随时可用
              - 集成全局模型与渠道过滤，一键驱动全页所有卡片（尤其是缓存命中率）与图表
          ===================================================================== */}
-      <div className="sticky -top-2.5 sm:-top-4 md:-top-8 z-30 pt-1.5 pb-1.5 bg-background/90 backdrop-blur-md border-b border-border/70 shadow-sm transition-all min-w-0">
-        <div className="bg-card/95 border border-border/80 rounded-2xl px-2.5 sm:px-3.5 py-2 sm:py-2.5 shadow-sm space-y-2 min-w-0">
-          {/* 第一行：锚点跳转 + 时间粒度 + 刷新 & 回到顶部 */}
+      <div className="sticky -top-2.5 sm:-top-4 md:-top-8 z-30 pt-1.5 pb-1.5 bg-background border-b border-border/70 shadow-sm min-w-0">
+        <div className="bg-card border border-border/80 rounded-2xl px-2.5 sm:px-3.5 py-2 sm:py-2.5 shadow-sm space-y-2 min-w-0">
+          {/* 第一行：锚点跳转 + 时间粒度 + 筛选折叠 + 刷新 & 回到顶部 */}
           <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2 min-w-0">
-            {/* 模块快捷跳转胶囊（移动端单行横向滑动，桌面端自动换行） */}
-            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap pb-0.5 sm:pb-0">
-              {NAV_SECTIONS.map(nav => {
-                const isActive = activeAnchor === nav.id;
-                return (
-                  <button
-                    key={nav.id}
-                    type="button"
-                    onClick={() => scrollToSection(nav.id)}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all whitespace-nowrap shrink-0 ${
-                      isActive
-                        ? 'bg-primary/15 text-primary border border-primary/40 font-semibold'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/60 border border-transparent'
-                    }`}
-                  >
-                    {nav.label}
-                  </button>
-                );
-              })}
-            </div>
+            <ScrollSpyNavPills onJump={scrollToSection} />
 
             {/* 时间范围 + 操作按钮 */}
             <div className="flex items-center justify-between sm:justify-end gap-1.5 min-w-0">
@@ -874,7 +1149,7 @@ export default function Dashboard() {
                         setCustomEnd('');
                         setRangeKey(opt.key);
                       }}
-                      className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg transition-all whitespace-nowrap shrink-0 ${
+                      className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 ${
                         active
                           ? 'bg-primary text-primary-foreground shadow-sm'
                           : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
@@ -887,7 +1162,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setShowCustomTime(v => !v)}
-                  className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-medium rounded-lg inline-flex items-center gap-1 whitespace-nowrap shrink-0 ${
                     customStart || customEnd || showCustomTime
                       ? 'bg-primary/15 text-primary border border-primary/30'
                       : 'text-muted-foreground hover:text-foreground'
@@ -902,206 +1177,318 @@ export default function Dashboard() {
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
-                  onClick={fetchDashboard}
+                  onClick={toggleFiltersCollapsed}
+                  title={filtersCollapsed ? '展开模型/Key/渠道筛选面板' : '收起筛选面板'}
+                  className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-xl border whitespace-nowrap ${
+                    hasActiveFilter
+                      ? 'bg-primary/15 text-primary border-primary/40 font-semibold'
+                      : !filtersCollapsed
+                      ? 'bg-muted/70 text-foreground border-border/80'
+                      : 'text-muted-foreground hover:text-foreground bg-muted/40 border-border/80'
+                  }`}
+                >
+                  <Filter className="w-3.5 h-3.5" />
+                  <span>{filtersCollapsed ? '展开筛选' : '收起筛选'}</span>
+                  {activeFilterCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-primary text-primary-foreground text-[10px] font-bold tabular-nums leading-tight">
+                      {activeFilterCount}
+                    </span>
+                  )}
+                  {filtersCollapsed ? (
+                    <ChevronDown className="w-3.5 h-3.5 opacity-80" />
+                  ) : (
+                    <ChevronUp className="w-3.5 h-3.5 opacity-80" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => fetchDashboard(true)}
                   title="刷新实时数据"
                   className="p-1.5 text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/80 border border-border/80 rounded-xl transition-colors"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-primary' : ''}`} />
                 </button>
 
-                <button
-                  type="button"
-                  onClick={scrollToTop}
-                  title="回到顶部"
-                  className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 text-xs font-medium rounded-xl border transition-all whitespace-nowrap ${
-                    isScrolled
-                      ? 'bg-primary text-primary-foreground border-primary shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground bg-muted/40 border-border/80'
-                  }`}
-                >
-                  <ArrowUp className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">回到顶部</span>
-                </button>
+                <BackToTopButton onClick={scrollToTop} />
               </div>
             </div>
           </div>
 
-          {/* 第二行：全局「模型」快捷胶囊筛选（移动端单行横向滑动不遮挡屏幕） + 「Key/渠道」筛选 */}
-          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-1.5 sm:gap-2 pt-1.5 border-t border-border/50 min-w-0">
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap sm:flex-1 min-w-0 pb-0.5 sm:pb-0">
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground shrink-0 mr-0.5">
-                <Filter className="w-3 h-3 text-primary" />
-                模型:
-              </span>
-              <button
-                type="button"
-                onClick={() => setSelectedModels([])}
-                className={`px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-all whitespace-nowrap shrink-0 ${
-                  selectedModels.length === 0
-                    ? 'bg-foreground text-background border-foreground font-semibold'
-                    : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
-                }`}
-              >
-                全部模型 ({availableModels.length})
-              </button>
-
-              {availableModels.slice(0, 8).map(item => {
-                const isSelected = selectedModels.includes(item.model);
-                return (
+          {/* 折叠状态下：若存在激活的筛选条件，展示紧凑单行摘要条，支持随时单击移除或展开 */}
+          {filtersCollapsed && hasActiveFilter && (
+            <div className="flex items-center justify-between gap-1.5 pt-1.5 border-t border-border/50 min-w-0">
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar min-w-0 flex-1">
+                <span className="text-[11px] text-muted-foreground shrink-0">已筛选:</span>
+                {selectedModels.map(m => (
                   <button
-                    key={item.model}
+                    key={`chip-m-${m}`}
                     type="button"
-                    onClick={() => toggleModelFilter(item.model)}
-                    title={`点击只看 ${item.model}（请求 ${item.requests} 次 · 缓存命中率 ${item.cache_hit_rate}% · 速度 ${item.speed_tok_s} tok/s）`}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-lg border transition-all tabular-nums whitespace-nowrap shrink-0 ${
-                      isSelected
-                        ? 'bg-primary text-primary-foreground border-primary font-semibold shadow-sm'
-                        : 'bg-muted/30 text-foreground/85 border-border/70 hover:bg-muted/70'
-                    }`}
+                    onClick={() => toggleModelFilter(m)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md bg-primary/15 text-primary border border-primary/30 whitespace-nowrap shrink-0"
+                    title="点击移除该模型筛选"
                   >
-                    <span className="truncate max-w-[135px] sm:max-w-[150px]">{item.model}</span>
-                    <span
-                      className={`text-[10px] px-1 rounded shrink-0 ${
-                        isSelected
-                          ? 'bg-primary-foreground/20 text-primary-foreground'
-                          : item.cache_hit_rate >= 50
-                          ? 'bg-cyan-500/15 text-cyan-400'
-                          : 'bg-muted text-muted-foreground'
-                      }`}
-                    >
-                      {item.cache_hit_rate.toFixed(0)}%♻
-                    </span>
+                    <span className="truncate max-w-[120px]">{m}</span>
+                    <X className="w-2.5 h-2.5" />
                   </button>
-                );
-              })}
-            </div>
-
-            {/* 右侧：Key 筛选开关 + 渠道筛选开关 + 一键重置过滤 */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full shrink-0 sm:flex-wrap">
-              <button
-                type="button"
-                onClick={() => setShowKeyDrawer(v => !v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                  selectedKeys.length > 0 || showKeyDrawer
-                    ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
-                    : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
-                }`}
-              >
-                <KeyRound className="w-3 h-3" />
-                {selectedKeys.length > 0
-                  ? `已选 ${selectedKeys.length} 条 Key`
-                  : `按 Key 筛选 (${availableKeys.length})`}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowProviderDrawer(v => !v)}
-                className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                  selectedProviders.length > 0 || showProviderDrawer
-                    ? 'bg-primary/15 text-primary border-primary/40'
-                    : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
-                }`}
-              >
-                <Server className="w-3 h-3" />
-                {selectedProviders.length > 0
-                  ? `已选 ${selectedProviders.length} 个渠道`
-                  : `按渠道筛选 (${availableProviders.length})`}
-              </button>
-
-              {hasActiveFilter && (
+                ))}
+                {selectedKeys.map(kh => (
+                  <button
+                    key={`chip-k-${kh}`}
+                    type="button"
+                    onClick={() => toggleKeyFilter(kh)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30 whitespace-nowrap shrink-0"
+                    title="点击移除该 Key 筛选"
+                  >
+                    <KeyRound className="w-2.5 h-2.5" />
+                    <span className="truncate max-w-[110px]">{keyLabelMap.get(kh) || kh.slice(0, 8)}</span>
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                ))}
+                {selectedProviders.map(p => (
+                  <button
+                    key={`chip-p-${p}`}
+                    type="button"
+                    onClick={() => toggleProviderFilter(p)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap shrink-0"
+                    title="点击移除该渠道筛选"
+                  >
+                    <span className="truncate max-w-[110px]">{p}</span>
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={clearAllFilters}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 rounded-lg transition-colors whitespace-nowrap"
                 >
                   <X className="w-3 h-3" />
-                  清除筛选
+                  清除
                 </button>
-              )}
-            </div>
-          </div>
-
-          {/* 展开的 API Key 多选抽屉 */}
-          {showKeyDrawer && (
-            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
-              <span className="text-[11px] text-muted-foreground mr-1">选择 API Key:</span>
-              <button
-                type="button"
-                onClick={() => setSelectedKeys([])}
-                className={`px-2 py-0.5 text-[11px] rounded-md border ${
-                  selectedKeys.length === 0
-                    ? 'bg-foreground text-background border-foreground font-semibold'
-                    : 'bg-muted/40 text-muted-foreground border-border/70'
-                }`}
-              >
-                全部 Key ({availableKeys.length})
-              </button>
-              {availableKeys.map(k => {
-                const active = selectedKeys.includes(k.key_hash);
-                return (
-                  <button
-                    key={k.key_hash}
-                    type="button"
-                    onClick={() => toggleKeyFilter(k.key_hash)}
-                    title={`${k.key_label} (${k.api_key_prefix})${k.api_key_group ? ` · 分组 ${k.api_key_group}` : ''} · 请求 ${k.requests} 次 · Token ${formatTokens(k.total_tokens)} · ¥${k.cost_cny.toFixed(2)}`}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-md border transition-colors tabular-nums ${
-                      active
-                        ? 'bg-amber-500 text-slate-950 border-amber-500 font-semibold shadow-sm'
-                        : 'bg-muted/30 text-muted-foreground border-border/70 hover:text-foreground'
-                    }`}
-                  >
-                    <KeyRound className="w-2.5 h-2.5 opacity-80 shrink-0" />
-                    <span className="truncate max-w-[120px] sm:max-w-[140px]">{k.key_label}</span>
-                    {k.api_key_group && (
-                      <span
-                        className={`text-[9px] px-1 rounded shrink-0 ${
-                          active ? 'bg-slate-950/20 text-slate-950' : 'bg-muted text-muted-foreground'
-                        }`}
-                      >
-                        {k.api_key_group}
-                      </span>
-                    )}
-                    <span className="opacity-75 text-[10px] shrink-0">({formatTokens(k.total_tokens)})</span>
-                  </button>
-                );
-              })}
+                <button
+                  type="button"
+                  onClick={toggleFiltersCollapsed}
+                  className="inline-flex items-center gap-0.5 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground rounded-lg border border-border/70 bg-muted/30 whitespace-nowrap"
+                >
+                  展开
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+              </div>
             </div>
           )}
 
-          {/* 展开的渠道多选抽屉 */}
-          {showProviderDrawer && (
-            <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
-              <span className="text-[11px] text-muted-foreground mr-1">选择渠道:</span>
-              <button
-                type="button"
-                onClick={() => setSelectedProviders([])}
-                className={`px-2 py-0.5 text-[11px] rounded-md border ${
-                  selectedProviders.length === 0
-                    ? 'bg-foreground text-background border-foreground font-semibold'
-                    : 'bg-muted/40 text-muted-foreground border-border/70'
-                }`}
-              >
-                全部渠道
-              </button>
-              {availableProviders.map(p => {
-                const active = selectedProviders.includes(p.provider);
-                return (
+          {/* 第二行（可折叠）：全局「模型」快捷胶囊筛选 + 「Key/渠道」筛选 */}
+          {!filtersCollapsed && (
+            <>
+              <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-1.5 sm:gap-2 pt-1.5 border-t border-border/50 min-w-0">
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap sm:flex-1 min-w-0 pb-0.5 sm:pb-0">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground shrink-0 mr-0.5">
+                    <Filter className="w-3 h-3 text-primary" />
+                    模型:
+                  </span>
                   <button
-                    key={p.provider}
                     type="button"
-                    onClick={() => toggleProviderFilter(p.provider)}
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md border transition-colors tabular-nums ${
-                      active
-                        ? 'bg-primary text-primary-foreground border-primary font-semibold'
-                        : 'bg-muted/30 text-muted-foreground border-border/70 hover:text-foreground'
+                    onClick={() => setSelectedModels([])}
+                    className={`px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-all whitespace-nowrap shrink-0 ${
+                      selectedModels.length === 0
+                        ? 'bg-foreground text-background border-foreground font-semibold'
+                        : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
                     }`}
                   >
-                    <span>{p.provider}</span>
-                    <span className="opacity-70 text-[10px]">({p.requests})</span>
+                    全部模型 ({availableModels.length})
                   </button>
-                );
-              })}
-            </div>
+
+                  {(showAllModels ? availableModels : availableModels.slice(0, 8)).map(item => {
+                    const isSelected = selectedModels.includes(item.model);
+                    return (
+                      <button
+                        key={item.model}
+                        type="button"
+                        onClick={() => toggleModelFilter(item.model)}
+                        title={`点击只看 ${item.model}（请求 ${item.requests} 次 · 缓存命中率 ${item.cache_hit_rate}% · 速度 ${item.speed_tok_s} tok/s）`}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-lg border transition-all tabular-nums whitespace-nowrap shrink-0 ${
+                          isSelected
+                            ? 'bg-primary text-primary-foreground border-primary font-semibold shadow-sm'
+                            : 'bg-muted/30 text-foreground/85 border-border/70 hover:bg-muted/70'
+                        }`}
+                      >
+                        <span className="truncate max-w-[135px] sm:max-w-[150px]">{item.model}</span>
+                        <span
+                          className={`text-[10px] px-1 rounded shrink-0 ${
+                            isSelected
+                              ? 'bg-primary-foreground/20 text-primary-foreground'
+                              : item.cache_hit_rate >= 50
+                              ? 'bg-cyan-500/15 text-cyan-400'
+                              : 'bg-muted text-muted-foreground'
+                          }`}
+                        >
+                          {item.cache_hit_rate.toFixed(0)}%♻
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                  {availableModels.length > 8 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllModels(v => !v)}
+                      className="inline-flex items-center gap-0.5 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground bg-muted/30 border border-border/70 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                    >
+                      {showAllModels ? (
+                        <>
+                          收起 <ChevronUp className="w-3 h-3" />
+                        </>
+                      ) : (
+                        <>
+                          +{availableModels.length - 8} 更多 <ChevronDown className="w-3 h-3" />
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {/* 右侧：Key 筛选开关 + 渠道筛选开关 + 一键重置过滤 + 收起筛选 */}
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full shrink-0 sm:flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setShowKeyDrawer(v => !v)}
+                    className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                      selectedKeys.length > 0 || showKeyDrawer
+                        ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
+                        : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
+                    }`}
+                  >
+                    <KeyRound className="w-3 h-3" />
+                    {selectedKeys.length > 0
+                      ? `已选 ${selectedKeys.length} 条 Key`
+                      : `按 Key 筛选 (${availableKeys.length})`}
+                    {showKeyDrawer ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowProviderDrawer(v => !v)}
+                    className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                      selectedProviders.length > 0 || showProviderDrawer
+                        ? 'bg-primary/15 text-primary border-primary/40'
+                        : 'bg-muted/40 text-muted-foreground border-border/70 hover:text-foreground'
+                    }`}
+                  >
+                    <Server className="w-3 h-3" />
+                    {selectedProviders.length > 0
+                      ? `已选 ${selectedProviders.length} 个渠道`
+                      : `按渠道筛选 (${availableProviders.length})`}
+                    {showProviderDrawer ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+
+                  {hasActiveFilter && (
+                    <button
+                      type="button"
+                      onClick={clearAllFilters}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                      清除筛选
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={toggleFiltersCollapsed}
+                    title="折叠筛选栏"
+                    className="inline-flex items-center gap-0.5 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground bg-muted/30 border border-border/70 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  >
+                    收起
+                    <ChevronUp className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+
+              {/* 展开的 API Key 多选抽屉 */}
+              {showKeyDrawer && (
+                <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
+                  <span className="text-[11px] text-muted-foreground mr-1">选择 API Key:</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedKeys([])}
+                    className={`px-2 py-0.5 text-[11px] rounded-md border ${
+                      selectedKeys.length === 0
+                        ? 'bg-foreground text-background border-foreground font-semibold'
+                        : 'bg-muted/40 text-muted-foreground border-border/70'
+                    }`}
+                  >
+                    全部 Key ({availableKeys.length})
+                  </button>
+                  {availableKeys.map(k => {
+                    const active = selectedKeys.includes(k.key_hash);
+                    return (
+                      <button
+                        key={k.key_hash}
+                        type="button"
+                        onClick={() => toggleKeyFilter(k.key_hash)}
+                        title={`${k.key_label} (${k.api_key_prefix})${k.api_key_group ? ` · 分组 ${k.api_key_group}` : ''} · 请求 ${k.requests} 次 · Token ${formatTokens(k.total_tokens)} · ¥${k.cost_cny.toFixed(2)}`}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] rounded-md border transition-colors tabular-nums ${
+                          active
+                            ? 'bg-amber-500 text-slate-950 border-amber-500 font-semibold shadow-sm'
+                            : 'bg-muted/30 text-muted-foreground border-border/70 hover:text-foreground'
+                        }`}
+                      >
+                        <KeyRound className="w-2.5 h-2.5 opacity-80 shrink-0" />
+                        <span className="truncate max-w-[120px] sm:max-w-[140px]">{k.key_label}</span>
+                        {k.api_key_group && (
+                          <span
+                            className={`text-[9px] px-1 rounded shrink-0 ${
+                              active ? 'bg-slate-950/20 text-slate-950' : 'bg-muted text-muted-foreground'
+                            }`}
+                          >
+                            {k.api_key_group}
+                          </span>
+                        )}
+                        <span className="opacity-75 text-[10px] shrink-0">({formatTokens(k.total_tokens)})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* 展开的渠道多选抽屉 */}
+              {showProviderDrawer && (
+                <div className="pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5 max-h-36 overflow-y-auto">
+                  <span className="text-[11px] text-muted-foreground mr-1">选择渠道:</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedProviders([])}
+                    className={`px-2 py-0.5 text-[11px] rounded-md border ${
+                      selectedProviders.length === 0
+                        ? 'bg-foreground text-background border-foreground font-semibold'
+                        : 'bg-muted/40 text-muted-foreground border-border/70'
+                    }`}
+                  >
+                    全部渠道
+                  </button>
+                  {availableProviders.map(p => {
+                    const active = selectedProviders.includes(p.provider);
+                    return (
+                      <button
+                        key={p.provider}
+                        type="button"
+                        onClick={() => toggleProviderFilter(p.provider)}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md border transition-colors tabular-nums ${
+                          active
+                            ? 'bg-primary text-primary-foreground border-primary font-semibold'
+                            : 'bg-muted/30 text-muted-foreground border-border/70 hover:text-foreground'
+                        }`}
+                      >
+                        <span>{p.provider}</span>
+                        <span className="opacity-70 text-[10px]">({p.requests})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
 
           {/* 展开的自定义起止时间栏 */}
@@ -1452,6 +1839,7 @@ export default function Dashboard() {
                             strokeWidth={2}
                             dot={false}
                             connectNulls
+                            isAnimationActive={false}
                           />
                         ))}
                       </LineChart>
@@ -1475,9 +1863,9 @@ export default function Dashboard() {
                           formatter={(value: number, name: string) => [formatTokens(value), name]}
                         />
                         <Legend wrapperStyle={{ fontSize: '11px' }} />
-                        <Bar dataKey="completion_tokens" stackId="tok" name="输出 Token" fill="#10b981" maxBarSize={16} />
-                        <Bar dataKey="uncached_tokens" stackId="tok" name="输入(未命中缓存)" fill="#f59e0b" maxBarSize={16} />
-                        <Bar dataKey="cached_tokens" stackId="tok" name="输入(命中缓存)" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={16} />
+                        <Bar dataKey="completion_tokens" stackId="tok" name="输出 Token" fill="#10b981" maxBarSize={16} isAnimationActive={false} />
+                        <Bar dataKey="uncached_tokens" stackId="tok" name="输入(未命中缓存)" fill="#f59e0b" maxBarSize={16} isAnimationActive={false} />
+                        <Bar dataKey="cached_tokens" stackId="tok" name="输入(命中缓存)" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={16} isAnimationActive={false} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
@@ -1504,8 +1892,8 @@ export default function Dashboard() {
                           return [`${val.toLocaleString()} 次`, name];
                         }}
                       />
-                      <Bar yAxisId="left" dataKey="total_tokens" name="Token 总量" fill="#ef7d52" radius={[4, 4, 0, 0]} maxBarSize={16} />
-                      <Line yAxisId="right" type="monotone" dataKey="requests" name="请求数" stroke="#7c9cbf" strokeWidth={1.75} dot={false} activeDot={{ r: 4 }} />
+                      <Bar yAxisId="left" dataKey="total_tokens" name="Token 总量" fill="#ef7d52" radius={[4, 4, 0, 0]} maxBarSize={16} isAnimationActive={false} />
+                      <Line yAxisId="right" type="monotone" dataKey="requests" name="请求数" stroke="#7c9cbf" strokeWidth={1.75} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 ) : chartMode === 'cache' ? (
@@ -1523,10 +1911,10 @@ export default function Dashboard() {
                           return [formatTokens(val), name];
                         }}
                       />
-                      <Bar yAxisId="left" dataKey="completion_tokens" stackId="tok" name="输出 Token" fill="#10b981" maxBarSize={16} />
-                      <Bar yAxisId="left" dataKey="uncached_tokens" stackId="tok" name="输入(未命中缓存)" fill="#f59e0b" maxBarSize={16} />
-                      <Bar yAxisId="left" dataKey="cached_tokens" stackId="tok" name="输入(命中缓存)" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={16} />
-                      <Line yAxisId="right" type="monotone" dataKey="cache_hit_rate" name="缓存命中率 (%)" stroke="#e07a5f" strokeWidth={1.75} dot={false} />
+                      <Bar yAxisId="left" dataKey="completion_tokens" stackId="tok" name="输出 Token" fill="#10b981" maxBarSize={16} isAnimationActive={false} />
+                      <Bar yAxisId="left" dataKey="uncached_tokens" stackId="tok" name="输入(未命中缓存)" fill="#f59e0b" maxBarSize={16} isAnimationActive={false} />
+                      <Bar yAxisId="left" dataKey="cached_tokens" stackId="tok" name="输入(命中缓存)" fill="#38bdf8" radius={[4, 4, 0, 0]} maxBarSize={16} isAnimationActive={false} />
+                      <Line yAxisId="right" type="monotone" dataKey="cache_hit_rate" name="缓存命中率 (%)" stroke="#e07a5f" strokeWidth={1.75} dot={false} isAnimationActive={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 ) : chartMode === 'models' ? (
@@ -1548,6 +1936,7 @@ export default function Dashboard() {
                           dot={false}
                           connectNulls
                           activeDot={{ r: 4 }}
+                          isAnimationActive={false}
                         />
                       ))}
                     </LineChart>
@@ -1575,6 +1964,7 @@ export default function Dashboard() {
                           dot={false}
                           connectNulls
                           activeDot={{ r: 4 }}
+                          isAnimationActive={false}
                         />
                       ))}
                     </LineChart>
@@ -1587,9 +1977,9 @@ export default function Dashboard() {
                       <YAxis yAxisId="left" stroke={AXIS_COLOR} fontSize={11} tickLine={false} axisLine={false} />
                       <YAxis yAxisId="right" orientation="right" domain={[0, 100]} hide />
                       <Tooltip contentStyle={tooltipStyle} />
-                      <Bar yAxisId="left" dataKey="success_requests" stackId="req" name="成功请求" fill="#22c55e" maxBarSize={16} />
-                      <Bar yAxisId="left" dataKey="failed_requests" stackId="req" name="失败请求" fill="#ef4444" radius={[4, 4, 0, 0]} maxBarSize={16} />
-                      <Line yAxisId="right" type="monotone" dataKey="success_rate" name="成功率 (%)" stroke="#60a5fa" strokeWidth={1.75} dot={false} />
+                      <Bar yAxisId="left" dataKey="success_requests" stackId="req" name="成功请求" fill="#22c55e" maxBarSize={16} isAnimationActive={false} />
+                      <Bar yAxisId="left" dataKey="failed_requests" stackId="req" name="失败请求" fill="#ef4444" radius={[4, 4, 0, 0]} maxBarSize={16} isAnimationActive={false} />
+                      <Line yAxisId="right" type="monotone" dataKey="success_rate" name="成功率 (%)" stroke="#60a5fa" strokeWidth={1.75} dot={false} isAnimationActive={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 ) : (
@@ -1600,8 +1990,8 @@ export default function Dashboard() {
                       <YAxis yAxisId="left" stroke={AXIS_COLOR} fontSize={11} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${v} t/s`} />
                       <YAxis yAxisId="right" orientation="right" hide />
                       <Tooltip contentStyle={tooltipStyle} />
-                      <Bar yAxisId="left" dataKey="speed_tok_s" name="生成速度 (tok/s)" fill="#f59e0b" radius={[4, 4, 0, 0]} maxBarSize={16} />
-                      <Line yAxisId="right" type="monotone" dataKey="avg_ttft" name="平均首字 (s)" stroke="#38bdf8" strokeWidth={1.75} dot={false} />
+                      <Bar yAxisId="left" dataKey="speed_tok_s" name="生成速度 (tok/s)" fill="#f59e0b" radius={[4, 4, 0, 0]} maxBarSize={16} isAnimationActive={false} />
+                      <Line yAxisId="right" type="monotone" dataKey="avg_ttft" name="平均首字 (s)" stroke="#38bdf8" strokeWidth={1.75} dot={false} isAnimationActive={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 )}
@@ -1795,6 +2185,7 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-key-usage"
+        style={{ contentVisibility: 'auto', containIntrinsicSize: '0 360px' }}
         className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2031,7 +2422,11 @@ export default function Dashboard() {
       {/* =====================================================================
           3. 渠道与模型分布三联图（原版经典 3 图同屏：渠道成功率 + 模型分布 + Endpoint 分布）
          ===================================================================== */}
-      <div id="section-distributions" className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-w-0">
+      <div
+        id="section-distributions"
+        style={{ contentVisibility: 'auto', containIntrinsicSize: '0 300px' }}
+        className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-w-0"
+      >
         {/* 渠道成功率 (%) */}
         <div className="lg:col-span-5 bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm min-w-0 overflow-hidden">
           <div className="flex items-center justify-between gap-2 mb-4">
@@ -2061,6 +2456,7 @@ export default function Dashboard() {
                     name="成功率"
                     radius={[4, 4, 0, 0]}
                     className="cursor-pointer"
+                    isAnimationActive={false}
                     onClick={(data: any) => data?.name && toggleProviderFilter(data.name)}
                   >
                     {formattedChannelStats.map((entry, index) => (
@@ -2109,6 +2505,7 @@ export default function Dashboard() {
                     dataKey="count"
                     nameKey="model"
                     className="cursor-pointer"
+                    isAnimationActive={false}
                     onClick={(data: any) => data?.model && toggleModelFilter(data.model)}
                   >
                     {modelPieData.map((_, index) => (
@@ -2155,6 +2552,7 @@ export default function Dashboard() {
                     paddingAngle={2}
                     dataKey="value"
                     nameKey="name"
+                    isAnimationActive={false}
                     label={({ percent }) => `${(percent * 100).toFixed(0)}%`}
                     labelLine={false}
                   >
@@ -2184,6 +2582,7 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-channel-health"
+        style={{ contentVisibility: 'auto', containIntrinsicSize: '0 320px' }}
         className="bg-card border border-border/80 rounded-2xl shadow-sm overflow-hidden min-w-0"
       >
         <div className="px-3.5 sm:px-5 py-3.5 sm:py-4 border-b border-border/70 bg-muted/20 flex flex-wrap items-center justify-between gap-2">
@@ -2289,123 +2688,9 @@ export default function Dashboard() {
       </div>
 
       {/* =====================================================================
-          5. 工作回溯 · 近一年每日活动热力图（受顶部全局模型/渠道筛选联动）
+          5. 工作回溯 · 近一年每日活动热力图（受顶部全局模型/渠道筛选联动，悬浮状态隔离在子组件内）
          ===================================================================== */}
-      <div
-        id="section-heatmap"
-        className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-baseline gap-2.5 flex-wrap">
-            <h3 className="text-sm font-bold tracking-wide text-foreground">工作回溯</h3>
-            <span className="text-xs text-muted-foreground">
-              近一年每日活动 {hasActiveFilter ? '（已按顶部所选模型/渠道过滤）' : ''}
-            </span>
-          </div>
-          <div className="text-xs text-muted-foreground tabular-nums">
-            {hoveredDay ? (
-              <span className="text-foreground font-medium">
-                {hoveredDay.date} · {hoveredDay.requests.toLocaleString()} 次请求 · {formatTokens(hoveredDay.total_tokens)} tokens
-              </span>
-            ) : (
-              <span>
-                {heatmap?.active_days || 0} 天有活动 · 共 {(heatmap?.total_requests || 0).toLocaleString()} 次请求
-              </span>
-            )}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6 items-center min-w-0">
-          <div className="xl:col-span-7 overflow-x-auto pb-1 min-w-0 w-full">
-            <div className="inline-block min-w-[640px]">
-              <div className="relative h-4 mb-1 ml-6 text-[10px] text-muted-foreground select-none">
-                {heatmapGrid.monthHeaders.map((mh, idx) => (
-                  <span key={idx} className="absolute" style={{ left: `${mh.colIndex * 13}px` }}>
-                    {mh.label}
-                  </span>
-                ))}
-              </div>
-
-              <div className="flex items-start gap-1.5">
-                <div className="grid grid-rows-7 gap-[3px] text-[10px] text-muted-foreground pr-1 select-none leading-[10px]">
-                  <span className="h-[10px] flex items-center">一</span>
-                  <span className="h-[10px]" />
-                  <span className="h-[10px] flex items-center">三</span>
-                  <span className="h-[10px]" />
-                  <span className="h-[10px] flex items-center">五</span>
-                  <span className="h-[10px]" />
-                  <span className="h-[10px]" />
-                </div>
-
-                <div className="flex gap-[3px]">
-                  {heatmapGrid.weeks.map((week, wIdx) => (
-                    <div key={wIdx} className="grid grid-rows-7 gap-[3px]">
-                      {week.map((day, dIdx) =>
-                        day === null ? (
-                          <span key={dIdx} className="w-[10px] h-[10px] rounded-[2px] opacity-0" />
-                        ) : (
-                          <span
-                            key={day.date}
-                            onMouseEnter={() => setHoveredDay(day)}
-                            onMouseLeave={() => setHoveredDay(null)}
-                            title={`${day.date}: ${day.requests} 请求 / ${formatTokens(day.total_tokens)} tokens`}
-                            className={`w-[10px] h-[10px] rounded-[2px] transition-transform hover:scale-125 cursor-pointer ${getHeatmapCellColor(
-                              day.requests,
-                              heatmapGrid.maxReqs
-                            )}`}
-                          />
-                        )
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="xl:col-span-5 grid grid-cols-2 gap-y-3 sm:gap-y-5 gap-x-4 sm:gap-x-8 pt-2 xl:pt-0 xl:pl-4 border-t xl:border-t-0 xl:border-l border-border/60 min-w-0">
-            <div>
-              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
-                {heatmap?.active_days || 0}
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">天有活动</div>
-            </div>
-            <div>
-              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
-                {(heatmap?.total_requests || 0).toLocaleString()}
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">总请求</div>
-            </div>
-            <div>
-              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
-                {formatTokens(heatmap?.total_tokens || 0)}
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">总 Token</div>
-            </div>
-            <div>
-              <div className="text-lg sm:text-xl font-bold tabular-nums text-foreground">
-                {(heatmap?.peak_day_requests || 0).toLocaleString()}
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                峰值单日 · {heatmap?.peak_day_date || '--'}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
-          <span>近一年 {formatTokens(heatmap?.total_tokens || 0)} tokens</span>
-          <div className="flex items-center gap-1">
-            <span>少</span>
-            <span className="w-2.5 h-2.5 rounded-[2px] bg-muted/70 dark:bg-[#2a2927]" />
-            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#6b4c3e]" />
-            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#9a5b42]" />
-            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#c96a48]" />
-            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#ef7d52]" />
-            <span>多</span>
-          </div>
-        </div>
-      </div>
+      <ActivityHeatmapSection heatmap={heatmap} hasActiveFilter={hasActiveFilter} />
 
       {/* =====================================================================
           6. 统一用量明细表（渠道×模型交叉明细 / 按模型汇总 / 按渠道汇总）
@@ -2413,6 +2698,7 @@ export default function Dashboard() {
          ===================================================================== */}
       <div
         id="section-breakdown"
+        style={{ contentVisibility: 'auto', containIntrinsicSize: '0 400px' }}
         className="bg-card border border-border/80 rounded-2xl p-3.5 sm:p-5 shadow-sm space-y-4 min-w-0 overflow-hidden"
       >
         <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2.5 sm:gap-3 min-w-0">
@@ -2457,9 +2743,10 @@ export default function Dashboard() {
                 <button
                   key={tab.key}
                   type="button"
-                  onClick={() =>
-                    setBreakdownTab(tab.key as 'cross' | 'key' | 'key_model' | 'model' | 'provider')
-                  }
+                  onClick={() => {
+                    setBreakdownTab(tab.key as 'cross' | 'key' | 'key_model' | 'model' | 'provider');
+                    setShowAllBreakdownRows(false);
+                  }}
                   className={`px-2.5 sm:px-3 py-1 text-xs font-medium rounded-md transition-all whitespace-nowrap shrink-0 ${
                     breakdownTab === tab.key
                       ? 'bg-card text-foreground shadow-sm border border-border/60 font-semibold'
@@ -2499,7 +2786,7 @@ export default function Dashboard() {
                     </td>
                   </tr>
                 ) : (
-                  filteredCrossRows.map((entry, i) => (
+                  (showAllBreakdownRows ? filteredCrossRows : filteredCrossRows.slice(0, 50)).map((entry, i) => (
                     <tr key={i} className="hover:bg-muted/30 transition-colors">
                       <td className="px-4 py-3 font-medium text-foreground">
                         <button
@@ -2592,7 +2879,7 @@ export default function Dashboard() {
                     </td>
                   </tr>
                 ) : (
-                  filteredKeyRows.map(row => (
+                  (showAllBreakdownRows ? filteredKeyRows : filteredKeyRows.slice(0, 50)).map(row => (
                     <tr
                       key={row.key_hash}
                       onClick={() => toggleKeyFilter(row.key_hash)}
@@ -2700,7 +2987,7 @@ export default function Dashboard() {
                     </td>
                   </tr>
                 ) : (
-                  filteredKeyModelRows.map((entry, i) => (
+                  (showAllBreakdownRows ? filteredKeyModelRows : filteredKeyModelRows.slice(0, 50)).map((entry, i) => (
                     <tr key={i} className="hover:bg-muted/30 transition-colors">
                       <td className="px-4 py-3 font-medium text-foreground">
                         <button
@@ -2787,7 +3074,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50 tabular-nums">
-                {filteredModelRows.map(row => (
+                {(showAllBreakdownRows ? filteredModelRows : filteredModelRows.slice(0, 50)).map(row => (
                   <tr
                     key={row.model}
                     onClick={() => row.model && toggleModelFilter(row.model)}
@@ -2849,7 +3136,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50 tabular-nums">
-                {filteredProviderRows.map(row => (
+                {(showAllBreakdownRows ? filteredProviderRows : filteredProviderRows.slice(0, 50)).map(row => (
                   <tr
                     key={row.provider}
                     onClick={() => row.provider && toggleProviderFilter(row.provider)}
@@ -2879,6 +3166,39 @@ export default function Dashboard() {
             </table>
           </div>
         )}
+
+        {(() => {
+          const activeLen =
+            breakdownTab === 'cross'
+              ? filteredCrossRows.length
+              : breakdownTab === 'key'
+              ? filteredKeyRows.length
+              : breakdownTab === 'key_model'
+              ? filteredKeyModelRows.length
+              : breakdownTab === 'model'
+              ? filteredModelRows.length
+              : filteredProviderRows.length;
+          if (activeLen <= 50) return null;
+          return (
+            <div className="flex justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setShowAllBreakdownRows(v => !v)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/70 border border-border/70 rounded-xl transition-colors"
+              >
+                {showAllBreakdownRows ? (
+                  <>
+                    收起至前 50 条记录 <ChevronUp className="w-3.5 h-3.5" />
+                  </>
+                ) : (
+                  <>
+                    展开全部 {activeLen} 条记录 <ChevronDown className="w-3.5 h-3.5" />
+                  </>
+                )}
+              </button>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Key 深度分析侧滑抽屉（查看 IP 分布、配额与报错明细，全程使用安全 key_hash 不暴露完整密钥） */}

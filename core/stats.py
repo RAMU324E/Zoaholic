@@ -86,6 +86,14 @@ REQUEST_STATS_DASHBOARD_COVER_INDEX_SQL = (
     "prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens, "
     "process_time, first_response_time, prompt_price, completion_price)"
 )
+REQUEST_STATS_TS_ENDPOINT_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_request_stats_ts_endpoint "
+    "ON request_stats(timestamp DESC, endpoint)"
+)
+CHANNEL_STATS_TS_PROVIDER_SUCCESS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_channel_stats_ts_provider_success "
+    "ON channel_stats(timestamp DESC, provider, success)"
+)
 # 修改原因：D1 初始化和 SQLite 启动迁移需要共享同一组性能索引，避免两条数据库路径优化不一致。
 # 修改方式：将 Dashboard、日志列表和渠道分析所需的复合索引集中成不可变元组。
 # 目的：新增实例、旧 SQLite 库重启迁移、D1 初始化都能自动获得相同的查询计划基础。
@@ -94,8 +102,10 @@ STATS_PERFORMANCE_INDEX_SQLS = (
     REQUEST_STATS_MODEL_TIMESTAMP_INDEX_SQL,
     REQUEST_STATS_REQUEST_ID_TOKEN_INDEX_SQL,
     REQUEST_STATS_DASHBOARD_COVER_INDEX_SQL,
+    REQUEST_STATS_TS_ENDPOINT_INDEX_SQL,
     CHANNEL_STATS_PROVIDER_MODEL_TIMESTAMP_SUCCESS_INDEX_SQL,
     CHANNEL_STATS_PROVIDER_TIMESTAMP_KEY_SUCCESS_REQUEST_INDEX_SQL,
+    CHANNEL_STATS_TS_PROVIDER_SUCCESS_INDEX_SQL,
 )
 # 修改原因：D1 的 CREATE TABLE IF NOT EXISTS 不会给旧表补列，而新增上游响应头后 D1 写入会包含该列。
 # 修改方式：为 D1 启动迁移单独维护新增的文本日志列集合。
