@@ -270,16 +270,26 @@ def apply_model_prefill(
     if contents[-1].get("role") == "model":
         return False
 
-    if not prefill_tool_rounds:
-        for turn in reversed(contents):
-            if not isinstance(turn, dict) or turn.get("role") == "model":
-                break
-            parts = turn.get("parts") if isinstance(turn.get("parts"), list) else []
-            if any(
-                isinstance(p, dict) and ("functionResponse" in p or "function_response" in p)
-                for p in parts
-            ):
-                return False
+    has_tool_response_since_last_model = False
+    has_inline_media_since_last_model = False
+    for turn in reversed(contents):
+        if not isinstance(turn, dict) or turn.get("role") == "model":
+            break
+        parts = turn.get("parts") if isinstance(turn.get("parts"), list) else []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if "functionResponse" in p or "function_response" in p:
+                has_tool_response_since_last_model = True
+            if "inlineData" in p or "inline_data" in p or "fileData" in p or "file_data" in p:
+                has_inline_media_since_last_model = True
+
+    if has_tool_response_since_last_model:
+        # Always skip prefill when a tool-result round carries an inline image attachment
+        # (e.g. after nai_generate returns an image and the model must inspect the image +
+        # call intermediate_reply), or when prefill_tool_rounds is explicitly disabled.
+        if not prefill_tool_rounds or has_inline_media_since_last_model:
+            return False
 
     model_parts = []
     if ais_cot:
