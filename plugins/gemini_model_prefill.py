@@ -243,6 +243,22 @@ def _has_declared_tools(payload: Dict[str, Any]) -> bool:
     return True
 
 
+def _has_declared_tool_named(payload: Dict[str, Any], target_name: str) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return False
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        decls = item.get("functionDeclarations") or item.get("function_declarations") or []
+        if not isinstance(decls, list):
+            continue
+        for decl in decls:
+            if isinstance(decl, dict) and decl.get("name") == target_name:
+                return True
+    return False
+
+
 def _select_caster_cot(payload: Dict[str, Any], sig_mode: str = "auto") -> tuple[str, str]:
     if sig_mode == "tool":
         return AIS_TOOL_CASTER_THOUGHT_TEXT, AIS_TOOL_CASTER_SIG
@@ -285,10 +301,22 @@ def apply_model_prefill(
                 has_inline_media_since_last_model = True
 
     if has_tool_response_since_last_model:
-        # Always skip prefill when a tool-result round carries an inline image attachment
-        # (e.g. after nai_generate returns an image and the model must inspect the image +
-        # call intermediate_reply), or when prefill_tool_rounds is explicitly disabled.
-        if not prefill_tool_rounds or has_inline_media_since_last_model:
+        # When a tool-result round carries an inline image attachment (e.g. after
+        # nai_generate returns an image and the model must immediately invoke
+        # intermediate_reply to send it), skip the text prefill and force toolConfig
+        # mode=ANY for intermediate_reply if declared. Without mode=ANY, Gemini 4
+        # Hydrogen frequently returns finishReason=MALFORMED_RESPONSE when attempting
+        # to call intermediate_reply right after an inlineData tool image.
+        if has_inline_media_since_last_model:
+            if _has_declared_tool_named(payload, "intermediate_reply") and "toolConfig" not in payload:
+                payload["toolConfig"] = {
+                    "functionCallingConfig": {
+                        "mode": "ANY",
+                        "allowedFunctionNames": ["intermediate_reply"],
+                    }
+                }
+            return False
+        if not prefill_tool_rounds:
             return False
 
     model_parts = []
