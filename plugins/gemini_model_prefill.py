@@ -92,15 +92,15 @@ PARAMS_SCHEMA = [
         "key": "effort",
         "label": "隐身推理强度 (EFFORT LEVEL)",
         "type": "select",
-        "default": "0.00",
+        "default": "off",
         "options": [
+            {"label": "off（不注入 EFFORT LEVEL 指令，遵循渠道原生 thinkingConfig）", "value": "off"},
             {"label": "0.00（关闭额外推理，直出响应/工具调用）", "value": "0.00"},
             {"label": "0.25（轻量推理）", "value": "0.25"},
             {"label": "0.50（中等推理）", "value": "0.50"},
             {"label": "1.00（完整推理）", "value": "1.00"},
-            {"label": "off（不注入 EFFORT LEVEL 指令）", "value": "off"},
         ],
-        "hint": "在末尾 user 续写轮注入 SPECIAL INSTRUCTION: think silently if needed. EFFORT LEVEL: X",
+        "hint": "默认 off（让模型按渠道 thinkingConfig 正常产出思维链，避免 thoughtsTokenCount=0 时调工具报 MALFORMED_RESPONSE）",
         "serialize": "key_value",
     },
     {
@@ -123,7 +123,7 @@ PLUGIN_INFO = {
     "metadata": {
         "category": "interceptors",
         "tags": ["gemini", "prefill", "ais"],
-        "params_hint": "ais_cot=true,prefill_tool_rounds=true,uuau_sandwich=true,sig_mode=auto,effort=0.00",
+        "params_hint": "ais_cot=true,prefill_tool_rounds=true,uuau_sandwich=true,sig_mode=auto,effort=off",
         "params_schema": PARAMS_SCHEMA,
     },
 }
@@ -151,7 +151,7 @@ def resolve_prefill_options_dict(options: Any) -> Dict[str, Any]:
         "prefill_tool_rounds": True,
         "uuau_sandwich": True,
         "sig_mode": "auto",
-        "effort": "0.00",
+        "effort": "off",
     }
     if isinstance(options, dict):
         if options.get("text") is not None:
@@ -261,7 +261,7 @@ def apply_model_prefill(
     prefill_tool_rounds: bool = True,
     uuau_sandwich: bool = True,
     sig_mode: str = "auto",
-    effort: str = "0.00",
+    effort: str = "off",
 ) -> bool:
     """Append a model prefill (and optional UUAU user continuation) to payload["contents"]."""
     contents = payload.get("contents") if isinstance(payload, dict) else None
