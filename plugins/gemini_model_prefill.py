@@ -301,7 +301,6 @@ def apply_model_prefill(
         return False
 
     has_tool_response_since_last_model = False
-    has_image_producer_tool_since_last_model = False
     has_inline_media_since_last_model = False
     for turn in reversed(contents):
         if not isinstance(turn, dict) or turn.get("role") == "model":
@@ -310,34 +309,18 @@ def apply_model_prefill(
         for p in parts:
             if not isinstance(p, dict):
                 continue
-            fr = p.get("functionResponse") or p.get("function_response")
-            if isinstance(fr, dict):
-                has_tool_response_since_last_model = True
-                if str(fr.get("name") or "") == "nai_generate":
-                    has_image_producer_tool_since_last_model = True
-            elif "functionResponse" in p or "function_response" in p:
+            if "functionResponse" in p or "function_response" in p:
                 has_tool_response_since_last_model = True
             if "inlineData" in p or "inline_data" in p or "fileData" in p or "file_data" in p:
                 has_inline_media_since_last_model = True
 
     if has_tool_response_since_last_model:
-        # When an image-producing tool round (e.g. nai_generate) carries an inline
-        # image attachment, skip the text prefill; if it is nai_generate, force
-        # toolConfig mode=ANY for intermediate_reply so the generated image is sent
-        # immediately without hitting MALFORMED_RESPONSE. Never force mode=ANY on
-        # read_file/grep/etc., which may inspect an image without needing to send one.
+        # When a tool-result round carries an inline image attachment (e.g. after
+        # nai_generate returns an image), skip the text prefill so the model can
+        # freely inspect or send the image in AUTO mode. Never force toolConfig
+        # mode=ANY here: Gemini 4 Hydrogen in mode=ANY without thinkingConfig HIGH
+        # can enter a degenerate loop emitting 100+ duplicate intermediate_reply calls.
         if has_inline_media_since_last_model:
-            if (
-                has_image_producer_tool_since_last_model
-                and _has_declared_tool_named(payload, "intermediate_reply")
-                and "toolConfig" not in payload
-            ):
-                payload["toolConfig"] = {
-                    "functionCallingConfig": {
-                        "mode": "ANY",
-                        "allowedFunctionNames": ["intermediate_reply"],
-                    }
-                }
             return False
         if not prefill_tool_rounds:
             return False

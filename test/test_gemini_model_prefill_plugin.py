@@ -46,31 +46,19 @@ def test_skips_tool_result_round_and_existing_model_tail():
     ]}
     assert apply_model_prefill(tool_then_user, "x", prefill_tool_rounds=False) is False
 
-    # read_file + inlineData does NOT force mode=ANY for intermediate_reply
-    read_file_with_image = {
-        "contents": [
-            _user(),
-            {"role": "model", "parts": [{"functionCall": {"name": "read_file", "args": {}}}]},
-            {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "response": {}}}]},
-            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]},
-        ],
-        "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
-    }
-    assert apply_model_prefill(read_file_with_image, "", ais_cot=True) is False
-    assert "toolConfig" not in read_file_with_image
-
-    # nai_generate + inlineData forces mode=ANY for intermediate_reply
-    nai_with_image = {
-        "contents": [
-            _user(),
-            {"role": "model", "parts": [{"functionCall": {"name": "nai_generate", "args": {}}}]},
-            {"role": "user", "parts": [{"functionResponse": {"name": "nai_generate", "response": {}}}]},
-            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]},
-        ],
-        "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
-    }
-    assert apply_model_prefill(nai_with_image, "", ais_cot=True) is False
-    assert nai_with_image["toolConfig"]["functionCallingConfig"]["mode"] == "ANY"
+    # Tool round with inlineData skips text prefill and never forces toolConfig mode=ANY
+    for tool_name in ("read_file", "nai_generate"):
+        with_image = {
+            "contents": [
+                _user(),
+                {"role": "model", "parts": [{"functionCall": {"name": tool_name, "args": {}}}]},
+                {"role": "user", "parts": [{"functionResponse": {"name": tool_name, "response": {}}}]},
+                {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]},
+            ],
+            "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
+        }
+        assert apply_model_prefill(with_image, "", ais_cot=True) is False
+        assert "toolConfig" not in with_image
 
     # A new user message after an earlier, finished tool round is prefilled.
     new_user_round = {"contents": [
