@@ -314,8 +314,14 @@ def apply_model_prefill(
             if "inlineData" in p or "inline_data" in p or "fileData" in p or "file_data" in p:
                 has_inline_media_since_last_model = True
 
-    if has_tool_response_since_last_model and not prefill_tool_rounds:
-        return False
+    if has_tool_response_since_last_model:
+        # When a tool-result round carries an inline image attachment (e.g. after
+        # nai_generate returns an image), skip the prefill entirely so the model
+        # can immediately invoke intermediate_reply in native AUTO mode.
+        if has_inline_media_since_last_model:
+            return False
+        if not prefill_tool_rounds:
+            return False
 
     model_parts = []
     if ais_cot:
@@ -329,10 +335,7 @@ def apply_model_prefill(
         )
         if text:
             model_parts.append({"text": text})
-        elif uuau_sandwich and not (has_tool_response_since_last_model and has_inline_media_since_last_model):
-            # Omit DEFAULT_ACK_TEXT on tool+image rounds so the model does not
-            # skip calling intermediate_reply / nai_generate, while still keeping
-            # the signed CoT turn to prevent MALFORMED_RESPONSE on sensitive images.
+        elif uuau_sandwich:
             model_parts.append({"text": DEFAULT_ACK_TEXT})
     elif text:
         model_parts.append({"text": text})
