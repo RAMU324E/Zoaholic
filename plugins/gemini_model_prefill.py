@@ -31,7 +31,6 @@ _INTERCEPTOR_ID = "gemini_model_prefill_request"
 DEFAULT_PREFILL = ""
 DEFAULT_ACK_TEXT = "好的，已确认当前上下文设定与指令要求，现在直接开始执行："
 DEFAULT_CONTINUE_TEXT = "请继续。"
-DEFAULT_SILENT_THOUGHT_INSTRUCTION = "SPECIAL INSTRUCTION: think silently if needed. EFFORT LEVEL: 0.50."
 
 AIS_TOOL_CASTER_SIG = (
     "Es4KCssKAWkUfRNOySlPIKodDuCthD1re46FTJ85vtAkg8JTMFY119MXCP6AlN/LJnP+Wdo/6SwH3TRl4wsccLPjStxvN+FOlxzlOfuMFSRzqOzfvupRzUDNpr6PpPetZb2INGlEacfwZVSUsK/Nzsgzi7+GuKXFIft/dLH9zuepU/C8YMCZ7GpnFtG88R1jZ8xI665EoKn/8m1kdelO4wjd+0fq35Cyn2I6aVaSetVrV2IoyQeXEH/JOeYJBPwTe5dR2NHT7IXzmN1pSMfMPAFhPGXG/gvNppjzyt/2lBe9sUPubTQW3qFLfplJjNPoTgSTMb/Rs1R/6AEPHRUezuuvch7uKf5LOlCa7NDcvhl2xNTnUURXIzTcqd7f769h96hlfjfTIz0iF+jEXH3usC+mYIPDotSOqtkCpAIRsutNKa0q8RBUeZWPamxc7aOgSAoi2X+SYScMc4Ui5YrRQNj2yGUwW764y+DM2fDuahPZ174Yz7Wp16ZjBXFBneNvWozt7fHc//rXczI377OYrtJ554mzbOjWC9s7ONI/Qjzh030WyACGLy2+pReJPPL1Brbs7QEb1R6rzNZx/MY4HR7aFTo6dtuq3wgm6Z13PNmzzlYBkgUuovlhs1LRa+SO1jhx53s+vb40iEOmirTD+sMB3ySyL5Tz7RquwQiXIiR3lVTAcISaOn2iOFV47lZduUEjAUQXSExplQujo1pxxdfvi74d5rOCwxzfmNzkccGT19M/zM0SV8I25F99X8Xc6VqPvJvrpXKQ7k4XpssCnZq+WetivWw6qq7PLNcJUtQA5hSczAcPKo8ez2jBF80JEQf54d6VaxqxuAkth11lkEqqCmVaupC17wxf9ugzeKxUnAPzvS29sLwWq5dMK+7m8USVOBm78fQ7f+rkdrBhOFwhqkTJkYacqpd5AYbln5q6Y/7GIux+b3EQcEr7WjWTcKF8NOGT67oq4b61EbJKb+HxybLoFtqamQJL7Ya35gbFXGtNT2dT9RCg1fo/i/VcLqETN6OTworqQicxasnptCWQk/Zj9u2YejAqvKX8vMxja9lA7BFm67Zn4MPkJrVsGT6zYRD2Fjidl2QbEoIq7/Kh8nsJbsdcS46ah5TLwTm8URpRxpuiXlSSe00zqliKPkERfB2FaCqYrZUWyt44QkJlDGfGCjC/SFmJBbhDeDhXeWb0tsEOgG6d8RMFG/N02mrEtYr1aheo6fMWTbDR7/8XI90GC/90kf3mIWF+T67yZieakpj4FBoL/LUufOrKpKpKK3iBJOLH9yv6+L3ASC9p4BYkGzkYaemScjpQAKumwhFfuBoEPFKYIoF+gvs2F0dcvCHLU88PEjF72PVHC8pomkn/chCDMLQxcMKk3UW3hTrlSL596lxQuR/dAsWI5x/LFRkv95N5SIAJ2OblMU8GpX0Hi+YPFexP+uXzZ2EZiTj5d+lBINoTsVfK/6x/OF26IoS+9c8cLbdMJbNyt3MnvPhuRWpDWjSA8jhx7szQ0LtHR9rw60Sth5KEvCYTM7pzQfKsEdU/p4hzRMwVG7l2dC7vOb36anRiyDkkUnWbseodFFcImZbkOVz8SZbQZ7f3LF8KNKIp+zO56Xbjemp0T6/qsrVVUL7CtAt0cq7IqwBcTuI4pRfyA2oxdlzURObsufN5LT7nbpNMLBaarSqKbeeVxkmkdlAGbBXm6YN2UH9UFvw/HyI+uZtsQiz7fzVezAnRPFgIBRG1fxvjEjnKF+hQDGXVSFYSUVF4y2Oshfvx+gE4CGYJhGJfQZl5KjiI6KEkHFWeoNn69OV4VillM="
@@ -363,7 +362,7 @@ def apply_model_prefill(
                 }
             )
         else:
-            user_parts.append({"text": DEFAULT_SILENT_THOUGHT_INSTRUCTION, "thought": True})
+            user_parts.append({"text": " ", "thought": True})
         contents.append({"role": "user", "parts": user_parts})
         return True
 
@@ -407,7 +406,7 @@ def apply_model_prefill(
             eff_txt = (
                 f"SPECIAL INSTRUCTION: think silently if needed. EFFORT LEVEL: {effort}."
                 if (effort and effort != "off")
-                else DEFAULT_SILENT_THOUGHT_INSTRUCTION
+                else " "
             )
             contents.append({"role": "user", "parts": [{"text": eff_txt, "thought": True}]})
     return True
