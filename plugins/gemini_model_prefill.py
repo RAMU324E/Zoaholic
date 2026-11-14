@@ -172,9 +172,23 @@ def resolve_prefill_options_dict(options: Any) -> Dict[str, Any]:
                 cfg["effort"] = ef
     elif isinstance(options, str):
         raw = options.strip()
-        if raw.startswith("text=") and "," not in raw:
-            cfg["text"] = raw[len("text="):].strip()
-        elif any(
+        if raw.startswith("text="):
+            first_segment = raw.split(",", 1)[0]
+            rest = raw[len(first_segment) + 1 :] if "," in raw else ""
+            if not any(
+                k in rest
+                for k in (
+                    "ais_cot",
+                    "no_ais_cot",
+                    "prefill_tool_rounds",
+                    "uuau_sandwich",
+                    "sig_mode=",
+                    "effort=",
+                )
+            ):
+                cfg["text"] = raw[len("text=") :].strip()
+                return cfg
+        if any(
             k in raw
             for k in (
                 "ais_cot",
@@ -287,6 +301,7 @@ def apply_model_prefill(
         return False
 
     has_tool_response_since_last_model = False
+    has_image_producer_tool_since_last_model = False
     has_inline_media_since_last_model = False
     for turn in reversed(contents):
         if not isinstance(turn, dict) or turn.get("role") == "model":
@@ -295,20 +310,28 @@ def apply_model_prefill(
         for p in parts:
             if not isinstance(p, dict):
                 continue
-            if "functionResponse" in p or "function_response" in p:
+            fr = p.get("functionResponse") or p.get("function_response")
+            if isinstance(fr, dict):
+                has_tool_response_since_last_model = True
+                if str(fr.get("name") or "") == "nai_generate":
+                    has_image_producer_tool_since_last_model = True
+            elif "functionResponse" in p or "function_response" in p:
                 has_tool_response_since_last_model = True
             if "inlineData" in p or "inline_data" in p or "fileData" in p or "file_data" in p:
                 has_inline_media_since_last_model = True
 
     if has_tool_response_since_last_model:
-        # When a tool-result round carries an inline image attachment (e.g. after
-        # nai_generate returns an image and the model must immediately invoke
-        # intermediate_reply to send it), skip the text prefill and force toolConfig
-        # mode=ANY for intermediate_reply if declared. Without mode=ANY, Gemini 4
-        # Hydrogen frequently returns finishReason=MALFORMED_RESPONSE when attempting
-        # to call intermediate_reply right after an inlineData tool image.
+        # When an image-producing tool round (e.g. nai_generate) carries an inline
+        # image attachment, skip the text prefill; if it is nai_generate, force
+        # toolConfig mode=ANY for intermediate_reply so the generated image is sent
+        # immediately without hitting MALFORMED_RESPONSE. Never force mode=ANY on
+        # read_file/grep/etc., which may inspect an image without needing to send one.
         if has_inline_media_since_last_model:
-            if _has_declared_tool_named(payload, "intermediate_reply") and "toolConfig" not in payload:
+            if (
+                has_image_producer_tool_since_last_model
+                and _has_declared_tool_named(payload, "intermediate_reply")
+                and "toolConfig" not in payload
+            ):
                 payload["toolConfig"] = {
                     "functionCallingConfig": {
                         "mode": "ANY",

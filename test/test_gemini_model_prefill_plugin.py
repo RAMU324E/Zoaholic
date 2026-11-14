@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from plugins.gemini_model_prefill import (
     AIS_TEXT_CASTER_SIG,
     AIS_TEXT_CASTER_THOUGHT_TEXT,
+    DEFAULT_ACK_TEXT,
+    DEFAULT_CONTINUE_TEXT,
     DEFAULT_PREFILL,
     apply_model_prefill,
     gemini_model_prefill_request_interceptor,
@@ -26,8 +28,9 @@ def test_appends_model_turn_after_user_turn():
 
 def test_skips_tool_result_round_and_existing_model_tail():
     tool_round = {"contents": [_user(), {"role": "user", "parts": [{"functionResponse": {"name": "f", "response": {}}}]}]}
-    assert apply_model_prefill(tool_round, "x") is False
+    assert apply_model_prefill(tool_round, "x", prefill_tool_rounds=False) is False
     assert len(tool_round["contents"]) == 2
+    assert apply_model_prefill(tool_round, "x", prefill_tool_rounds=True) is True
 
     model_tail = {"contents": [_user(), {"role": "model", "parts": [{"text": "client prefill"}]}]}
     assert apply_model_prefill(model_tail, "x") is False
@@ -41,7 +44,33 @@ def test_skips_tool_result_round_and_existing_model_tail():
         _user("tool produced images"),
         _user("dynamic context"),
     ]}
-    assert apply_model_prefill(tool_then_user, "x") is False
+    assert apply_model_prefill(tool_then_user, "x", prefill_tool_rounds=False) is False
+
+    # read_file + inlineData does NOT force mode=ANY for intermediate_reply
+    read_file_with_image = {
+        "contents": [
+            _user(),
+            {"role": "model", "parts": [{"functionCall": {"name": "read_file", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "response": {}}}]},
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]},
+        ],
+        "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
+    }
+    assert apply_model_prefill(read_file_with_image, "", ais_cot=True) is False
+    assert "toolConfig" not in read_file_with_image
+
+    # nai_generate + inlineData forces mode=ANY for intermediate_reply
+    nai_with_image = {
+        "contents": [
+            _user(),
+            {"role": "model", "parts": [{"functionCall": {"name": "nai_generate", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "nai_generate", "response": {}}}]},
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AA=="}}]},
+        ],
+        "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
+    }
+    assert apply_model_prefill(nai_with_image, "", ais_cot=True) is False
+    assert nai_with_image["toolConfig"]["functionCallingConfig"]["mode"] == "ANY"
 
     # A new user message after an earlier, finished tool round is prefilled.
     new_user_round = {"contents": [
@@ -79,6 +108,9 @@ def test_interceptor_reads_channel_options():
     asyncio.run(gemini_model_prefill_request_interceptor(None, "gemini", default_provider, None, "u", {}, payload2))
     assert payload2["contents"][-2] == {
         "role": "model",
-        "parts": [{"text": AIS_TEXT_CASTER_THOUGHT_TEXT, "thought": True, "thoughtSignature": AIS_TEXT_CASTER_SIG}],
+        "parts": [
+            {"text": AIS_TEXT_CASTER_THOUGHT_TEXT, "thought": True, "thoughtSignature": AIS_TEXT_CASTER_SIG},
+            {"text": DEFAULT_ACK_TEXT},
+        ],
     }
-    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": ".", "thought": True}]}
+    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": DEFAULT_CONTINUE_TEXT}]}
