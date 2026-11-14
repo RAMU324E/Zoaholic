@@ -10,6 +10,7 @@ from plugins.gemini_model_prefill import (
     DEFAULT_ACK_TEXT,
     DEFAULT_CONTINUE_TEXT,
     DEFAULT_PREFILL,
+    DEFAULT_SILENT_THOUGHT_INSTRUCTION,
     apply_model_prefill,
     gemini_model_prefill_request_interceptor,
     resolve_prefill_text,
@@ -66,7 +67,7 @@ def test_skips_tool_result_round_and_existing_model_tail():
         }
         assert with_image["contents"][-1] == {
             "role": "user",
-            "parts": [{"text": " ", "thought": True}],
+            "parts": [{"text": DEFAULT_SILENT_THOUGHT_INSTRUCTION, "thought": True}],
         }
         # Idempotency check: calling again does not stack another CER_TAIL
         assert apply_model_prefill(with_image, "", ais_cot=True) is False
@@ -111,4 +112,4 @@ def test_interceptor_reads_channel_options():
             {"text": AIS_TEXT_CASTER_THOUGHT_TEXT, "thought": True, "thoughtSignature": AIS_TEXT_CASTER_SIG},
         ],
     }
-    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": " ", "thought": True}]}
+    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": DEFAULT_SILENT_THOUGHT_INSTRUCTION, "thought": True}]}
