@@ -149,7 +149,7 @@ def resolve_prefill_options_dict(options: Any) -> Dict[str, Any]:
         "text": "",
         "ais_cot": True,
         "prefill_tool_rounds": True,
-        "uuau_sandwich": True,
+        "uuau_sandwich": False,
         "sig_mode": "auto",
         "effort": "off",
     }
@@ -161,7 +161,7 @@ def resolve_prefill_options_dict(options: Any) -> Dict[str, Any]:
         if "prefill_tool_rounds" in options:
             cfg["prefill_tool_rounds"] = _option_bool(options.get("prefill_tool_rounds"), default=True)
         if "uuau_sandwich" in options:
-            cfg["uuau_sandwich"] = _option_bool(options.get("uuau_sandwich"), default=True)
+            cfg["uuau_sandwich"] = _option_bool(options.get("uuau_sandwich"), default=False)
         if options.get("sig_mode") is not None:
             sm = str(options.get("sig_mode")).strip().lower()
             if sm in {"auto", "tool", "text"}:
@@ -283,21 +283,41 @@ def _select_caster_cot(payload: Dict[str, Any], sig_mode: str = "auto") -> tuple
     return AIS_TEXT_CASTER_THOUGHT_TEXT, AIS_TEXT_CASTER_SIG
 
 
+def _has_cer_or_thought_tail(contents: list[dict[str, Any]]) -> bool:
+    """Return True if contents already ends with CER_TAIL or an unsigned thought user turn."""
+    if not contents:
+        return False
+    last = contents[-1]
+    if isinstance(last, dict):
+        parts = last.get("parts") if isinstance(last.get("parts"), list) else []
+        if any(isinstance(p, dict) and ("codeExecutionResult" in p or "code_execution_result" in p) for p in parts):
+            return True
+        if (
+            last.get("role") == "user"
+            and parts
+            and all(isinstance(p, dict) and p.get("thought") is True and "thoughtSignature" not in p for p in parts)
+        ):
+            return True
+    return False
+
+
 def apply_model_prefill(
     payload: Dict[str, Any],
     text: str = "",
     ais_cot: bool = False,
     *,
     prefill_tool_rounds: bool = True,
-    uuau_sandwich: bool = True,
+    uuau_sandwich: bool = False,
     sig_mode: str = "auto",
     effort: str = "off",
 ) -> bool:
-    """Append a model prefill (and optional UUAU user continuation) to payload["contents"]."""
+    """Append a model prefill (or CER_TAIL on tool/image rounds) to payload["contents"]."""
     contents = payload.get("contents") if isinstance(payload, dict) else None
     if not isinstance(contents, list) or not contents or not isinstance(contents[-1], dict):
         return False
     if contents[-1].get("role") == "model":
+        return False
+    if _has_cer_or_thought_tail(contents):
         return False
 
     has_tool_response_since_last_model = False
@@ -314,14 +334,40 @@ def apply_model_prefill(
             if "inlineData" in p or "inline_data" in p or "fileData" in p or "file_data" in p:
                 has_inline_media_since_last_model = True
 
-    if has_tool_response_since_last_model:
-        # When a tool-result round carries an inline image attachment (e.g. after
-        # nai_generate returns an image), skip the prefill entirely so the model
-        # can immediately invoke intermediate_reply in native AUTO mode.
-        if has_inline_media_since_last_model:
-            return False
-        if not prefill_tool_rounds:
-            return False
+    if has_tool_response_since_last_model and not prefill_tool_rounds and not has_inline_media_since_last_model:
+        return False
+
+    # Per upstream aistudio guide: when tools are declared or the tail contains
+    # functionResponse / inlineData, never inject AIS_TOOL_CASTER_SIG or fake
+    # UUAU dialogue ("好的，已确认..." / "请继续。"), which hijacks tool selection.
+    # Instead, append CER_TAIL (codeExecutionResult + unsigned thought user turn)
+    # when ais_cot is enabled and no explicit custom text was requested.
+    if ais_cot and not text and (
+        _has_declared_tools(payload)
+        or has_tool_response_since_last_model
+        or has_inline_media_since_last_model
+    ):
+        contents.append(
+            {
+                "role": "model",
+                "parts": [{"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": " "}}],
+            }
+        )
+        user_parts = []
+        if effort and effort != "off":
+            user_parts.append(
+                {
+                    "text": f"SPECIAL INSTRUCTION: think silently if needed. EFFORT LEVEL: {effort}.",
+                    "thought": True,
+                }
+            )
+        else:
+            user_parts.append({"text": " ", "thought": True})
+        contents.append({"role": "user", "parts": user_parts})
+        return True
+
+    if has_tool_response_since_last_model and has_inline_media_since_last_model:
+        return False
 
     model_parts = []
     if ais_cot:
@@ -357,7 +403,7 @@ def apply_model_prefill(
             user_parts.append({"text": DEFAULT_CONTINUE_TEXT})
             contents.append({"role": "user", "parts": user_parts})
         else:
-            contents.append({"role": "user", "parts": [{"text": ".", "thought": True}]})
+            contents.append({"role": "user", "parts": [{"text": " ", "thought": True}]})
     return True
 
 

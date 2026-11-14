@@ -46,7 +46,8 @@ def test_skips_tool_result_round_and_existing_model_tail():
     ]}
     assert apply_model_prefill(tool_then_user, "x", prefill_tool_rounds=False) is False
 
-    # Tool round with inlineData skips prefill and never forces toolConfig mode=ANY
+    # Tool round with inlineData appends CER_TAIL + unsigned thought user turn
+    # (never injects AIS_TOOL_CASTER_SIG or fake dialogue, and never forces toolConfig mode=ANY)
     for tool_name in ("read_file", "nai_generate"):
         with_image = {
             "contents": [
@@ -57,8 +58,18 @@ def test_skips_tool_result_round_and_existing_model_tail():
             ],
             "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
         }
-        assert apply_model_prefill(with_image, "", ais_cot=True) is False
+        assert apply_model_prefill(with_image, "", ais_cot=True) is True
         assert "toolConfig" not in with_image
+        assert with_image["contents"][-2] == {
+            "role": "model",
+            "parts": [{"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": " "}}],
+        }
+        assert with_image["contents"][-1] == {
+            "role": "user",
+            "parts": [{"text": " ", "thought": True}],
+        }
+        # Idempotency check: calling again does not stack another CER_TAIL
+        assert apply_model_prefill(with_image, "", ais_cot=True) is False
 
     # A new user message after an earlier, finished tool round is prefilled.
     new_user_round = {"contents": [
@@ -98,7 +109,6 @@ def test_interceptor_reads_channel_options():
         "role": "model",
         "parts": [
             {"text": AIS_TEXT_CASTER_THOUGHT_TEXT, "thought": True, "thoughtSignature": AIS_TEXT_CASTER_SIG},
-            {"text": DEFAULT_ACK_TEXT},
         ],
     }
-    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": DEFAULT_CONTINUE_TEXT}]}
+    assert payload2["contents"][-1] == {"role": "user", "parts": [{"text": " ", "thought": True}]}
