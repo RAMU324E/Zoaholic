@@ -46,7 +46,8 @@ def test_skips_tool_result_round_and_existing_model_tail():
     ]}
     assert apply_model_prefill(tool_then_user, "x", prefill_tool_rounds=False) is False
 
-    # Tool round with inlineData skips text prefill and never forces toolConfig mode=ANY
+    # Tool round with inlineData keeps signed CoT prefill (to prevent MALFORMED_RESPONSE)
+    # but omits DEFAULT_ACK_TEXT (so the model does not skip calling tools) and never forces mode=ANY.
     for tool_name in ("read_file", "nai_generate"):
         with_image = {
             "contents": [
@@ -57,8 +58,11 @@ def test_skips_tool_result_round_and_existing_model_tail():
             ],
             "tools": [{"functionDeclarations": [{"name": "intermediate_reply"}]}],
         }
-        assert apply_model_prefill(with_image, "", ais_cot=True) is False
+        assert apply_model_prefill(with_image, "", ais_cot=True) is True
         assert "toolConfig" not in with_image
+        assert len(with_image["contents"][-2]["parts"]) == 1
+        assert with_image["contents"][-2]["parts"][0]["thought"] is True
+        assert with_image["contents"][-1] == {"role": "user", "parts": [{"text": DEFAULT_CONTINUE_TEXT}]}
 
     # A new user message after an earlier, finished tool round is prefilled.
     new_user_round = {"contents": [
