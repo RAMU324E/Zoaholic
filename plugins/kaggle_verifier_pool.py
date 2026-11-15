@@ -1064,6 +1064,52 @@ def _strip_url_key_param(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
+def _normalize_kaggle_genai_url(url: str, request: Any, engine: str, provider: Optional[Dict[str, Any]]) -> str:
+    """Ensure Kaggle Gemini URLs always include /models/genai/v1/models/{model}:{action} even with trailing '#' or unpatched gemini_channel."""
+    if not isinstance(url, str) or "mp-staging.kaggle.net" not in url.lower():
+        return url
+    eng = str(engine or "").lower()
+    base_url = str((provider or {}).get("base_url") or "")
+    if eng and eng != "gemini" and "/models/genai" not in base_url.lower() and "/models/" not in url.lower():
+        return url
+
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+
+    # Case 1: unpatched gemini_channel stripped '/models/genai/v1' -> path is '/models/{model}:{action}'
+    if (":generatecontent" in path.lower() or ":streamgeneratecontent" in path.lower()):
+        if not path.startswith("/models/genai/"):
+            idx = path.find("/models/")
+            if idx != -1:
+                path = "/models/genai/v1" + path[idx:]
+                return urlunparse(parsed._replace(path=path))
+        return url
+
+    # Case 2: base_url ended with '#' so gemini_channel skipped appending '/models/{model}:{action}'
+    req_model = str(getattr(request, "model", None) or "")
+    prefix = str((provider or {}).get("model_prefix") or "")
+    if prefix and req_model.startswith(prefix):
+        original_model = req_model[len(prefix):]
+    else:
+        original_model = req_model
+    if not original_model:
+        return url
+
+    is_stream = bool(getattr(request, "stream", False))
+    action = "streamGenerateContent" if is_stream else "generateContent"
+    query = parsed.query
+    if is_stream and "alt=sse" not in query:
+        query = f"{query}&alt=sse" if query else "alt=sse"
+
+    if path.endswith("/models"):
+        path = path[:-len("/models")]
+    if not path.endswith("/models/genai/v1"):
+        path = "/models/genai/v1"
+    full_path = f"{path}/models/{original_model}:{action}"
+    return urlunparse(parsed._replace(path=full_path, query=query))
+
+
+
 def _cap_max_tokens(payload: Dict[str, Any], cap: int) -> None:
     if not isinstance(payload, dict) or cap <= 0:
         return
@@ -1089,10 +1135,34 @@ def _cap_max_tokens(payload: Dict[str, Any], cap: int) -> None:
         payload["max_tokens"] = cap
 
 
+def _fix_nested_array_items(node: Any) -> None:
+    """Ensure every JSON Schema type='array' has an 'items' field with its own 'items' if nested.
+
+    Kaggle's Go protobuf gateway rejects ``{"type": "array", "items": {"type": "array"}}``
+    when the inner array omits ``items``.
+    """
+    if isinstance(node, dict):
+        if str(node.get("type") or "").lower() == "array":
+            items = node.get("items")
+            if not isinstance(items, dict):
+                node["items"] = {"type": "string"}
+            else:
+                _fix_nested_array_items(items)
+        for v in list(node.values()):
+            if isinstance(v, (dict, list)):
+                _fix_nested_array_items(v)
+    elif isinstance(node, list):
+        for elem in node:
+            if isinstance(elem, (dict, list)):
+                _fix_nested_array_items(elem)
+
+
 def _sanitize_gemini_payload(payload: Dict[str, Any]) -> None:
-    """Strip empty systemInstruction parts that cause Kaggle's Go protobuf gateway to return HTTP 400."""
+    """Strip empty systemInstruction parts and fix bare nested array schemas for Kaggle's Go protobuf gateway."""
     if not isinstance(payload, dict):
         return
+    if "tools" in payload:
+        _fix_nested_array_items(payload["tools"])
     for key in ("systemInstruction", "system_instruction"):
         if key not in payload:
             continue
@@ -1161,6 +1231,7 @@ async def kaggle_verifier_pool_request_interceptor(
     if not verifier_token and isinstance(api_key, str) and api_key.startswith("kaggleweb:"):
         verifier_token = api_key
 
+    url = _normalize_kaggle_genai_url(url, request, engine, provider)
     if verifier_token:
         url = _strip_url_key_param(url)
         low_url = url.lower()
