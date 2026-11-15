@@ -282,7 +282,23 @@ def get_proxy(proxy, client_config=None):
     if not proxy:
         return client_config
 
-    parsed = urlparse(proxy)
+    raw_proxy = str(proxy).strip()
+    if raw_proxy.lower() in ("ipv4", "ipv4://", "direct://ipv4", "0.0.0.0"):
+        transport_kwargs = {"local_address": "0.0.0.0"}
+        for key in ("verify", "cert", "trust_env", "limits", "http2"):
+            if key in client_config:
+                transport_kwargs[key] = client_config[key]
+        client_config["transport"] = httpx.AsyncHTTPTransport(**transport_kwargs)
+        return client_config
+    if raw_proxy.lower() in ("ipv6", "ipv6://", "direct://ipv6", "::"):
+        transport_kwargs = {"local_address": "::"}
+        for key in ("verify", "cert", "trust_env", "limits", "http2"):
+            if key in client_config:
+                transport_kwargs[key] = client_config[key]
+        client_config["transport"] = httpx.AsyncHTTPTransport(**transport_kwargs)
+        return client_config
+
+    parsed = urlparse(raw_proxy)
     raw_scheme = parsed.scheme.lower()
     scheme = raw_scheme.rstrip("ha")
 
