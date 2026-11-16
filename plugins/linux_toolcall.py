@@ -1379,9 +1379,19 @@ async def linux_toolcall_request_interceptor(
     new_payload = copy.deepcopy(payload)
 
     # UUAU / UAS 模式下（panic=False）始终挂载 Google 原生签名思维链（与 gemini_prefill v3.0 对齐）；
-    # 仅在旧版模式下参考 caster_cot 开关
+    # 仅在旧版模式下参考 caster_cot 开关。
+    # 注意：Kaggle Model Proxy (mp-staging.kaggle.net / kaggle_verifier_pool) 底层对接的是 AI Studio (MakerSuite) 签名体系，
+    # 若注入 Vertex 签名 (DEFAULT_CASTER_SIG) 会报 HTTP 400 "Corrupted thought signature."，因此自动对齐为 AIS_TOOL_CASTER_SIG。
     use_caster_cot = bool(options.get("caster_cot")) or (not options.get("panic") and options.get("prefill_mode") in {"off", "uau", "uas"})
-    active_caster_sig = AIS_TOOL_CASTER_SIG if options.get("ais_cot") else DEFAULT_CASTER_SIG
+    is_ais_or_kaggle = (
+        bool(options.get("ais_cot"))
+        or "kaggle" in str(url or "").lower()
+        or "kaggle" in str((provider or {}).get("provider") or "").lower()
+        or any(str(p).startswith("kaggle_verifier_pool") for p in ((provider or {}).get("preferences", {}).get("enabled_plugins") or []))
+    )
+    active_caster_sig = AIS_TOOL_CASTER_SIG if is_ais_or_kaggle else DEFAULT_CASTER_SIG
+    if is_ais_or_kaggle and kernel_cot == SIGNED_CREATIVE_THOUGHT_TEXT:
+        kernel_cot = AIS_TOOL_CASTER_THOUGHT_TEXT
 
     if protocol == "openai":
         prefill_mode = options["prefill_mode"]
