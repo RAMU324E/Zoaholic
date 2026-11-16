@@ -1158,11 +1158,23 @@ def _fix_nested_array_items(node: Any) -> None:
 
 
 def _sanitize_gemini_payload(payload: Dict[str, Any]) -> None:
-    """Strip empty systemInstruction parts and fix bare nested array schemas for Kaggle's Go protobuf gateway."""
+    """Strip empty systemInstruction parts, empty content parts ({}), and fix bare nested array schemas for Kaggle's Go protobuf gateway."""
     if not isinstance(payload, dict):
         return
     if "tools" in payload:
         _fix_nested_array_items(payload["tools"])
+    contents = payload.get("contents")
+    if isinstance(contents, list):
+        for msg in contents:
+            if isinstance(msg, dict) and isinstance(msg.get("parts"), list):
+                cleaned_msg_parts = [
+                    p for p in msg["parts"]
+                    if isinstance(p, dict)
+                    and bool(set(p.keys()) - {"thought", "thoughtSignature", "thought_signature", "videoMetadata"})
+                    and not (set(p.keys()) <= {"text"} and p.get("text") == "")
+                ]
+                if cleaned_msg_parts:
+                    msg["parts"] = cleaned_msg_parts
     for key in ("systemInstruction", "system_instruction"):
         if key not in payload:
             continue
